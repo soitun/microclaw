@@ -202,6 +202,7 @@ async fn maybe_plugin_slash_response(
 
 static SLACK_CHAT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
+static SLACK_ASSISTANT_THREADS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 fn slack_chat_lock(channel_name: &str, external_chat_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     let key = format!("{channel_name}:{external_chat_id}");
@@ -215,8 +216,85 @@ fn slack_chat_lock(channel_name: &str, external_chat_id: &str) -> Arc<tokio::syn
         .clone()
 }
 
+fn slack_assistant_key(channel: &str, user: &str) -> String {
+    format!("{channel}:{user}")
+}
+
+fn normalize_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn remember_assistant_thread(channel: &str, user: &str, thread_ts: &str) {
+    let Some(thread_ts) = normalize_non_empty(Some(thread_ts)) else {
+        return;
+    };
+    let cache = SLACK_ASSISTANT_THREADS.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    guard.insert(
+        slack_assistant_key(channel, user),
+        thread_ts.to_string(),
+    );
+}
+
+fn resolve_assistant_thread(channel: &str, user: &str) -> Option<String> {
+    let cache = SLACK_ASSISTANT_THREADS.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(guard) = cache.lock() else {
+        return None;
+    };
+    guard.get(&slack_assistant_key(channel, user)).cloned()
+}
+
 fn normalize_slack_thread_ts(thread_ts: Option<&str>) -> Option<&str> {
     thread_ts.map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn extract_slack_thread_ts(event: &serde_json::Value) -> Option<String> {
+    [
+        event.get("thread_ts").and_then(|v| v.as_str()),
+        event
+            .pointer("/assistant_thread/thread_ts")
+            .and_then(|v| v.as_str()),
+        event
+            .pointer("/assistant_thread/channel_thread_ts")
+            .and_then(|v| v.as_str()),
+        event.pointer("/message/thread_ts").and_then(|v| v.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|v| normalize_non_empty(Some(v)).map(ToOwned::to_owned))
+}
+
+fn should_handle_assistant_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "assistant_thread_started" | "assistant_thread_context_changed"
+    )
+}
+
+fn extract_assistant_event_channel_user(event: &serde_json::Value) -> Option<(String, String)> {
+    let channel = [
+        event.get("channel").and_then(|v| v.as_str()),
+        event
+            .pointer("/assistant_thread/channel_id")
+            .and_then(|v| v.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|v| normalize_non_empty(Some(v)).map(ToOwned::to_owned))?;
+
+    let user = [
+        event.get("user").and_then(|v| v.as_str()),
+        event
+            .pointer("/assistant_thread/user_id")
+            .and_then(|v| v.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|v| normalize_non_empty(Some(v)).map(ToOwned::to_owned))?;
+
+    Some((channel, user))
 }
 
 fn slack_external_chat_id(channel: &str, thread_ts: Option<&str>) -> String {
@@ -581,6 +659,23 @@ async fn run_socket_mode(
                         .unwrap_or("")
                         .to_string();
 
+                    if should_handle_assistant_event(&event_type) {
+                        let event = &envelope["payload"]["event"];
+                        let assistant_thread_ts = extract_slack_thread_ts(event);
+                        if let Some((assistant_channel, assistant_user)) =
+                            extract_assistant_event_channel_user(event)
+                        {
+                            if let Some(thread_ts) = assistant_thread_ts {
+                                remember_assistant_thread(
+                                    &assistant_channel,
+                                    &assistant_user,
+                                    &thread_ts,
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
                     if event_type == "message" || event_type == "app_mention" {
                         let event = &envelope["payload"]["event"];
 
@@ -616,10 +711,7 @@ async fn run_socket_mode(
                             .to_string();
                         let is_dm = channel_type == "im";
                         let is_app_mention = event_type == "app_mention";
-                        let thread_ts = event
-                            .get("thread_ts")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
+                        let mut thread_ts = extract_slack_thread_ts(event);
                         let ts = event
                             .get("ts")
                             .and_then(|v| v.as_str())
@@ -628,6 +720,11 @@ async fn run_socket_mode(
 
                         if channel.is_empty() || text_content.is_empty() {
                             continue;
+                        }
+                        if thread_ts.is_none() && is_dm {
+                            thread_ts = resolve_assistant_thread(&channel, &user);
+                        } else if let Some(thread_ts) = thread_ts.as_deref() {
+                            remember_assistant_thread(&channel, &user, thread_ts);
                         }
 
                         let state = app_state.clone();
@@ -945,5 +1042,42 @@ commands:
     fn test_should_skip_slack_message_subtype_skips_other_variants() {
         assert!(should_skip_slack_message_subtype(Some("message_changed")));
         assert!(should_skip_slack_message_subtype(Some("bot_message")));
+    }
+
+    #[test]
+    fn test_extract_slack_thread_ts_prefers_top_level_then_assistant() {
+        let event = serde_json::json!({
+            "thread_ts": "111.222",
+            "assistant_thread": {
+                "thread_ts": "333.444",
+                "channel_thread_ts": "555.666"
+            },
+            "message": { "thread_ts": "777.888" }
+        });
+        assert_eq!(extract_slack_thread_ts(&event).as_deref(), Some("111.222"));
+    }
+
+    #[test]
+    fn test_extract_slack_thread_ts_uses_assistant_fallbacks() {
+        let event = serde_json::json!({
+            "assistant_thread": {
+                "thread_ts": "333.444"
+            }
+        });
+        assert_eq!(extract_slack_thread_ts(&event).as_deref(), Some("333.444"));
+    }
+
+    #[test]
+    fn test_extract_assistant_event_channel_user_from_assistant_payload() {
+        let event = serde_json::json!({
+            "assistant_thread": {
+                "channel_id": "D123",
+                "user_id": "U456"
+            }
+        });
+        assert_eq!(
+            extract_assistant_event_channel_user(&event),
+            Some(("D123".to_string(), "U456".to_string()))
+        );
     }
 }
