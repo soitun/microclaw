@@ -119,23 +119,6 @@ export function SessionSidebar({
           </Text>
         </div>
         <div className="relative flex items-center gap-2">
-          {onToggleDesktopSidebar ? (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation()
-                onToggleDesktopSidebar()
-              }}
-              aria-label="Collapse sessions sidebar"
-              className={
-                isDark
-                  ? 'hidden md:inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-panel)] text-slate-200 hover:brightness-110'
-                  : 'hidden md:inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
-              }
-            >
-              <span className="text-sm">⟨</span>
-            </button>
-          ) : null}
           <button
             ref={themeButtonRef}
             type="button"
@@ -167,6 +150,23 @@ export function SessionSidebar({
           >
             <span className="text-sm">{isDark ? '☀' : '☾'}</span>
           </button>
+          {onToggleDesktopSidebar ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleDesktopSidebar()
+              }}
+              aria-label="Collapse sessions sidebar"
+              className={
+                isDark
+                  ? 'hidden md:inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-panel)] text-slate-200 hover:brightness-110'
+                  : 'hidden md:inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+              }
+            >
+              <span className="text-sm">⟨</span>
+            </button>
+          ) : null}
           {themeMenuOpen ? (
             <div
               ref={themeMenuRef}
