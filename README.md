@@ -1071,10 +1071,18 @@ MicroClaw's core loop is channel-agnostic. A new platform integration should mai
 | [CLAUDE.md](CLAUDE.md) | Project context for AI coding assistants |
 | [AGENTS.md](AGENTS.md) | Agent-friendly project reference |
 
-## License
-
-MIT
-
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=microclaw/microclaw&type=Date)](https://star-history.com/#microclaw/microclaw&Date)
+
+## Contributors
+
+Thanks to everyone who has contributed to this project.
+
+[![Contributors](https://contrib.rocks/image?repo=microclaw/microclaw)](https://github.com/microclaw/microclaw/graphs/contributors)
+
+
+
+## License
+
+MIT
