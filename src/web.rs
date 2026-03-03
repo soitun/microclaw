@@ -1511,6 +1511,18 @@ async fn handle_web_slash_command(state: &WebState, text: &str, chat_id: i64) ->
         return Some("Context cleared (session + chat history).".to_string());
     }
 
+    if trimmed == "/clear" {
+        let _ = call_blocking(state.app_state.db.clone(), move |db| {
+            db.clear_chat_conversation(chat_id)
+        })
+        .await;
+        let groups_dir = PathBuf::from(&state.app_state.config.data_dir).join("groups");
+        if let Err(e) = clear_todos(&groups_dir, "web", chat_id) {
+            warn!("Failed to clear TODO.json for chat {}: {}", chat_id, e);
+        }
+        return Some("Context cleared (session + chat history, scheduled tasks kept).".to_string());
+    }
+
     if trimmed == "/stop" {
         let stopped = crate::run_control::abort_runs("web", chat_id).await;
         if stopped > 0 {
@@ -2964,6 +2976,74 @@ mod tests {
             .and_then(|x| x.as_str())
             .unwrap_or_default();
         assert!(response.contains("Current provider/model"));
+    }
+
+    #[tokio::test]
+    async fn test_web_clear_slash_keeps_scheduled_tasks() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let app = build_router(web_state.clone());
+        let db = web_state.app_state.db.clone();
+        call_blocking(db, move |d| {
+            d.upsert_chat(4242, Some("chat:4242"), "web")?;
+            d.save_session(4242, r#"[{"role":"user","content":"hi"}]"#)?;
+            d.store_message(&StoredMessage {
+                id: "m1".into(),
+                chat_id: 4242,
+                sender_name: "alice".into(),
+                content: "hello".into(),
+                is_from_bot: false,
+                timestamp: "2024-01-01T00:00:01Z".into(),
+            })?;
+            d.create_scheduled_task(
+                4242,
+                "daily summary",
+                "cron",
+                "0 0 8 * * *",
+                "2099-01-01T08:00:00Z",
+            )?;
+            Ok::<(), microclaw_core::error::MicroClawError>(())
+        })
+        .await
+        .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/send")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"session_key":"chat:4242","sender_name":"u","message":"/clear"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v.get("response").and_then(|x| x.as_str()),
+            Some("Context cleared (session + chat history, scheduled tasks kept).")
+        );
+
+        let db = web_state.app_state.db.clone();
+        let (session, messages, tasks_len) = call_blocking(db, move |d| {
+            Ok::<
+                (Option<(String, String)>, Vec<StoredMessage>, usize),
+                microclaw_core::error::MicroClawError,
+            >((
+                d.load_session(4242)?,
+                d.get_recent_messages(4242, 10)?,
+                d.get_tasks_for_chat(4242)?.len(),
+            ))
+        })
+        .await
+        .unwrap();
+        assert!(session.is_none());
+        assert!(
+            messages.iter().all(|m| m.content != "hello"),
+            "old chat history should be removed by /clear"
+        );
+        assert_eq!(tasks_len, 1);
     }
 
     #[tokio::test]

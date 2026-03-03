@@ -280,7 +280,8 @@ MicroClaw 支持 [Anthropic Agent Skills](https://github.com/anthropics/skills) 
 
 **命令：**
 - `/stop` -- 中止当前聊天正在执行的 run（保留历史/会话数据）
-- `/reset` -- 清除当前聊天上下文（会话 + 聊天历史）
+- `/clear` -- 清除当前聊天上下文（会话 + 聊天历史），保留定时任务
+- `/reset` -- 清除当前聊天上下文（会话 + 聊天历史）并清空定时任务状态
 - `/skills` -- 列出所有可用技能
 - `/reload-skills` -- 从磁盘重新加载技能
 - `/archive` -- 将当前内存会话归档为 markdown
@@ -293,7 +294,7 @@ MicroClaw 支持 [Anthropic Agent Skills](https://github.com/anthropics/skills) 
 - 支持“前置提及 + slash”形式（例如 `@bot /status`、`<@U123> /status`）。
 - slash 命令不会写入 agent 会话上下文。
 - 未知 slash 命令返回 `Unknown command.`。
-- 需要中断正在执行的请求时用 `/stop`；需要清空上下文时用 `/reset`。
+- 需要中断正在执行的请求时用 `/stop`；仅清空上下文用 `/clear`；清空上下文并重置定时任务用 `/reset`。
 
 ## MCP
 

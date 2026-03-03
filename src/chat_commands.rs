@@ -54,6 +54,18 @@ pub async fn handle_chat_command(
 ) -> Option<String> {
     let trimmed = normalized_slash_command(command_text)?.trim();
 
+    if trimmed == "/clear" {
+        let _ = call_blocking(state.db.clone(), move |db| {
+            db.clear_chat_conversation(chat_id)
+        })
+        .await;
+        let groups_dir = std::path::PathBuf::from(&state.config.data_dir).join("groups");
+        if let Err(e) = clear_todos(&groups_dir, caller_channel, chat_id) {
+            warn!("Failed to clear TODO.json for chat {}: {}", chat_id, e);
+        }
+        return Some("Context cleared (session + chat history, scheduled tasks kept).".to_string());
+    }
+
     if trimmed == "/reset" {
         let _ = call_blocking(state.db.clone(), move |db| db.clear_chat_context(chat_id)).await;
         let groups_dir = std::path::PathBuf::from(&state.config.data_dir).join("groups");

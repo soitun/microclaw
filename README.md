@@ -333,7 +333,8 @@ See full manifest schema and examples: `docs/plugins/overview.md`.
 
 **Commands:**
 - `/stop` -- abort the current active run in this chat (keeps history/session data)
-- `/reset` -- clear current chat context (session + chat history)
+- `/clear` -- clear current chat context (session + chat history), keep scheduled tasks
+- `/reset` -- clear current chat context (session + chat history) and scheduled task state
 - `/skills` -- list all available skills
 - `/reload-skills` -- reload skills from disk
 - `/archive` -- archive current in-memory session as markdown
@@ -346,7 +347,7 @@ Command handling rules:
 - Inputs with leading mentions before slash are also treated as commands (for example `@bot /status`, `<@U123> /status`).
 - Slash commands do **not** enter agent conversation history/session context.
 - Unknown slash commands return `Unknown command.`.
-- Use `/stop` to interrupt an in-flight run; use `/reset` to wipe chat context.
+- Use `/stop` to interrupt an in-flight run, `/clear` to wipe chat context only, and `/reset` to wipe chat context plus scheduled task state.
 
 ## MCP
 
