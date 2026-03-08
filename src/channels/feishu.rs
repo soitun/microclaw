@@ -1623,8 +1623,28 @@ async fn try_send_feishu_reaction_token(
     )
     .await
     {
-        warn!("Feishu: failed to send reaction '{reaction_token}': {e}");
-        return false;
+        // Some tenants reject specific reaction types with code=231001.
+        // Fallback to SMILE so reaction mode remains functional.
+        if e.contains("code=231001")
+            && !emoji_type.eq_ignore_ascii_case("SMILE")
+            && send_feishu_reaction(
+                ctx.http_client,
+                ctx.base_url,
+                ctx.token,
+                ctx.message_id,
+                "SMILE",
+            )
+            .await
+            .is_ok()
+        {
+            warn!(
+                "Feishu: reaction '{}' unsupported, downgraded to SMILE",
+                reaction_token
+            );
+        } else {
+            warn!("Feishu: failed to send reaction '{reaction_token}': {e}");
+            return false;
+        }
     }
 
     let bot_msg = StoredMessage {
