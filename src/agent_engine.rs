@@ -170,6 +170,16 @@ fn summarize_for_user_note(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn truncate_for_log(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        text.to_string()
+    } else {
+        let clipped = text.chars().take(max_chars).collect::<String>();
+        format!("{clipped}...")
+    }
+}
+
 fn format_failed_action_for_user(tool_name: &str, input: &Value, result_content: &str) -> String {
     let error_summary = summarize_for_user_note(result_content, 140);
     if tool_name == "bash" {
@@ -896,6 +906,25 @@ pub(crate) async fn process_with_agent_impl(
             "Agent iteration completed"
         );
 
+        if iteration == 0 {
+            let raw_first_reply = response
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ResponseContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            info!(
+                chat_id,
+                iteration = 1,
+                preview_chars = raw_first_reply.chars().count(),
+                preview = truncate_for_log(&raw_first_reply, 1000),
+                "Initial model reply (raw text blocks)"
+            );
+        }
+
         if stop_reason == "end_turn" || stop_reason == "max_tokens" {
             let text = response
                 .content
@@ -907,7 +936,7 @@ pub(crate) async fn process_with_agent_impl(
                 .collect::<Vec<_>>()
                 .join("");
 
-            if text.contains("<think>") {
+            if text.contains("<think>") || text.contains("<thought>") {
                 let stripped_len = strip_thinking(&text).len();
                 let thinking_chars = text.len().saturating_sub(stripped_len);
                 debug!(
@@ -916,13 +945,16 @@ pub(crate) async fn process_with_agent_impl(
                 );
             }
 
-            // Strip <think> blocks unless show_thinking is enabled
+            // Always compute visible text without thinking tags for retry/fallback decisions.
+            let visible_text = strip_thinking(&text);
+            // Keep raw thinking text only when show_thinking is enabled.
             let display_text = if state.config.show_thinking {
                 text.clone()
             } else {
-                strip_thinking(&text)
+                visible_text.clone()
             };
-            if display_text.trim().is_empty() && !empty_visible_reply_retry_attempted {
+            let has_displayable_output = !display_text.trim().is_empty();
+            if !has_displayable_output && !empty_visible_reply_retry_attempted {
                 empty_visible_reply_retry_attempted = true;
                 warn!(
                     "Empty visible model reply; injecting runtime guard and retrying once (chat_id={})",
@@ -1006,7 +1038,7 @@ pub(crate) async fn process_with_agent_impl(
                 .iter()
                 .filter_map(|block| match block {
                     ResponseContentBlock::Text { text } => {
-                        if text.contains("<think>") {
+                        if text.contains("<think>") || text.contains("<thought>") {
                             let stripped_len = strip_thinking(text).len();
                             let thinking_chars = text.len().saturating_sub(stripped_len);
                             debug!(
@@ -1016,11 +1048,17 @@ pub(crate) async fn process_with_agent_impl(
                         }
                         Some(ContentBlock::Text { text: text.clone() })
                     }
-                    ResponseContentBlock::ToolUse { id, name, input } => {
+                    ResponseContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        thought_signature,
+                    } => {
                         Some(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
+                            thought_signature: thought_signature.clone(),
                         })
                     }
                     ResponseContentBlock::Other => None,
@@ -1036,7 +1074,10 @@ pub(crate) async fn process_with_agent_impl(
             let mut waiting_for_user_approval = false;
             let mut waiting_approval_tool: Option<String> = None;
             for block in &response.content {
-                if let ResponseContentBlock::ToolUse { id, name, input } = block {
+                if let ResponseContentBlock::ToolUse {
+                    id, name, input, ..
+                } = block
+                {
                     if name.trim().is_empty() {
                         warn!(
                             chat_id,
@@ -1882,23 +1923,8 @@ Built-in execution playbook:
 "#
     );
 
-    if caller_channel.starts_with("feishu") || caller_channel.starts_with("lark") {
-        prompt.push_str(
-            r#"
-Feishu reaction output protocol (optional, use only when appropriate):
-- For every Feishu or Lark message, choose exactly one of these 3 output modes:
-  1) Text only: return normal text.
-  2) Emoji only: output `reaction-only: <emoji-or-token>`.
-  3) Text + emoji: output:
-     `reaction: <emoji-or-token>`
-     `<reply text>`
-- You may also use `[reaction: <emoji-or-token>] <reply text>` for mode (3).
-- When you choose a reaction, pick only from this supported set:
-  `THUMBSUP`, `THUMBSDOWN`, `CLAP`, `THANKS`, `HEART`, `BROKENHEART`, `Fire`, `PARTY`, `SMILE`, `TearsofJoy`, `SOB`, `RAGE`, `FISTBUMP`, `ROCKET`, `100`, `LetMeSee`, `OK`, `LOVE`, `HAPPY`, `WINK`, `YEAH`, `STRONG`, `TOP`, `NO1`.
-- For normal Feishu replies/reactions, do NOT call `send_message`; return the final assistant text directly so channel reaction parsing can run.
-- Never output raw protocol text through `send_message` (for example `reaction-only: ...`, `reaction: ...`, `[reaction: ...]`, or lone tokens like `THUMBSUP`).
-"#,
-        );
+    if let Some(channel_prompt) = crate::channels::system_prompt_extension(caller_channel) {
+        prompt.push_str(channel_prompt);
     }
 
     if !memory_context.is_empty() {
@@ -2003,23 +2029,29 @@ pub(crate) fn history_to_claude_messages(
 /// Split long text for Telegram's 4096-char limit.
 /// Exposed for testing.
 #[allow(dead_code)]
-/// Strip `<think>...</think>` blocks from model output.
-/// Handles multiline content and multiple think blocks.
+/// Strip `<think>...</think>` and `<thought>...</thought>` blocks from model output.
+/// Handles multiline content and multiple blocks.
 pub(crate) fn strip_thinking(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<think>") {
-        result.push_str(&rest[..start]);
-        if let Some(end) = rest[start..].find("</think>") {
-            rest = &rest[start + end + "</think>".len()..];
-        } else {
-            // Unclosed <think> — strip everything after it
-            rest = "";
-            break;
+    fn strip_tag_blocks(input: &str, open: &str, close: &str) -> String {
+        let mut result = String::with_capacity(input.len());
+        let mut rest = input;
+        while let Some(start) = rest.find(open) {
+            result.push_str(&rest[..start]);
+            if let Some(end) = rest[start..].find(close) {
+                rest = &rest[start + end + close.len()..];
+            } else {
+                // Unclosed tag — strip everything after it
+                rest = "";
+                break;
+            }
         }
+        result.push_str(rest);
+        result
     }
-    result.push_str(rest);
-    result.trim().to_string()
+
+    let no_think = strip_tag_blocks(text, "<think>", "</think>");
+    let no_thought = strip_tag_blocks(&no_think, "<thought>", "</thought>");
+    no_thought.trim().to_string()
 }
 
 /// Extract text content from a Message for summarization/display.
@@ -2279,7 +2311,7 @@ async fn compact_messages(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_db_memory_context, history_to_claude_messages, process_with_agent,
+        build_db_memory_context, history_to_claude_messages, process_with_agent, strip_thinking,
         AgentRequestContext,
     };
     use crate::config::{Config, WorkingDirIsolation};
@@ -2380,6 +2412,7 @@ mod tests {
                         id: "tool-bash-1".to_string(),
                         name: "bash".to_string(),
                         input: json!({"command": "printf approved"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
@@ -2431,6 +2464,7 @@ mod tests {
                         id: format!("tool-bash-retry-{idx}"),
                         name: "bash".to_string(),
                         input: json!({"command": "printf approved"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
@@ -2759,6 +2793,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base_dir);
     }
 
+    #[test]
+    fn test_strip_thinking_removes_thought_and_think_tags() {
+        let text = "<thought>plan</thought>\n<think>private</think>\nVisible";
+        assert_eq!(strip_thinking(text), "Visible");
+    }
+
     #[tokio::test]
     async fn test_high_risk_tool_auto_retry_injects_approval_marker() {
         let base_dir =
@@ -2825,6 +2865,7 @@ mod tests {
                         id: "tool-bash-confirm".to_string(),
                         name: "bash".to_string(),
                         input: json!({"command": "printf approved"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
@@ -2883,6 +2924,7 @@ mod tests {
                         id: "tool-bash-fail".to_string(),
                         name: "bash".to_string(),
                         input: json!({"command": "git clone https://github.com/naamfung/zua.git /tmp/zua"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
