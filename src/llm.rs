@@ -371,6 +371,7 @@ struct StreamToolUseBlock {
     id: String,
     name: String,
     input_json: String,
+    thought_signature: Option<String>,
 }
 
 fn usage_from_json(v: &serde_json::Value) -> Option<Usage> {
@@ -445,6 +446,7 @@ fn process_anthropic_stream_event(
                                     id,
                                     name,
                                     input_json,
+                                    thought_signature: None,
                                 },
                             );
                         }
@@ -598,6 +600,9 @@ fn process_openai_stream_event(
                 if let Some(args) = function.get("arguments").and_then(|v| v.as_str()) {
                     entry.input_json.push_str(args);
                 }
+                if let Some(sig) = function.get("thought_signature").and_then(|v| v.as_str()) {
+                    entry.thought_signature = Some(sig.to_string());
+                }
             }
         }
     }
@@ -639,6 +644,7 @@ fn build_stream_response(
                 id: tool.id.clone(),
                 name: tool.name.clone(),
                 input: parse_tool_input(&tool.input_json),
+                thought_signature: tool.thought_signature.clone(),
             });
         }
     }
@@ -952,6 +958,8 @@ struct OaiToolCall {
 struct OaiFunction {
     name: String,
     arguments: String,
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1346,6 +1354,7 @@ impl LlmProvider for OpenAiProvider {
                 id: tool.id,
                 name: tool.name,
                 input: parse_tool_input(&tool.input_json),
+                thought_signature: tool.thought_signature,
             });
         }
         if content.is_empty() {
@@ -1541,14 +1550,25 @@ fn translate_messages_to_oai_with_reasoning(
                     let tool_calls: Vec<serde_json::Value> = blocks
                         .iter()
                         .filter_map(|b| match b {
-                            ContentBlock::ToolUse { id, name, input } => Some(json!({
-                                "id": id,
-                                "type": "function",
-                                "function": {
+                            ContentBlock::ToolUse {
+                                id,
+                                name,
+                                input,
+                                thought_signature,
+                            } => {
+                                let mut function_obj = json!({
                                     "name": name,
                                     "arguments": serde_json::to_string(input).unwrap_or_default()
+                                });
+                                if let Some(sig) = thought_signature {
+                                    function_obj["thought_signature"] = json!(sig);
                                 }
-                            })),
+                                Some(json!({
+                                    "id": id,
+                                    "type": "function",
+                                    "function": function_obj
+                                }))
+                            }
                             _ => None,
                         })
                         .collect();
@@ -1719,7 +1739,10 @@ fn translate_messages_to_oai_responses_input(messages: &[Message]) -> Vec<serde_
                     }
 
                     for block in blocks {
-                        if let ContentBlock::ToolUse { id, name, input } = block {
+                        if let ContentBlock::ToolUse {
+                            id, name, input, ..
+                        } = block
+                        {
                             out.push(json!({
                                 "type": "function_call",
                                 "call_id": id,
@@ -1851,6 +1874,7 @@ fn translate_oai_responses_response(resp: OaiResponsesResponse) -> MessagesRespo
                     id: call_id,
                     name,
                     input: parsed_args,
+                    thought_signature: None,
                 });
                 saw_tool_use = true;
             }
@@ -1916,6 +1940,7 @@ fn translate_oai_response(oai: OaiResponse) -> MessagesResponse {
                 id: tc.id,
                 name: tc.function.name,
                 input,
+                thought_signature: tc.function.thought_signature,
             });
         }
     }
@@ -2017,6 +2042,7 @@ mod tests {
                     id: "t1".into(),
                     name: "bash".into(),
                     input: json!({"command": "ls"}),
+                    thought_signature: None,
                 },
             ]),
         }];
@@ -2031,6 +2057,22 @@ mod tests {
     }
 
     #[test]
+    fn test_translate_messages_assistant_tool_use_includes_thought_signature() {
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "bash".into(),
+                input: json!({"command": "ls"}),
+                thought_signature: Some("sig_abc".into()),
+            }]),
+        }];
+        let out = translate_messages_to_oai("", &msgs);
+        let tc = out[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tc[0]["function"]["thought_signature"], "sig_abc");
+    }
+
+    #[test]
     fn test_translate_messages_assistant_tool_use_deepseek_reasoning() {
         let msgs = vec![Message {
             role: "assistant".into(),
@@ -2042,6 +2084,7 @@ mod tests {
                     id: "t1".into(),
                     name: "bash".into(),
                     input: json!({"command": "ls"}),
+                    thought_signature: None,
                 },
             ]),
         }];
@@ -2064,6 +2107,7 @@ mod tests {
                     id: "t1".into(),
                     name: "glob".into(),
                     input: json!({}),
+                    thought_signature: None,
                 }]),
             },
             Message {
@@ -2092,6 +2136,7 @@ mod tests {
                     id: "t1".into(),
                     name: "glob".into(),
                     input: json!({}),
+                    thought_signature: None,
                 }]),
             },
             Message {
@@ -2133,6 +2178,7 @@ mod tests {
                     id: "t1".into(),
                     name: "glob".into(),
                     input: json!({}),
+                    thought_signature: None,
                 }]),
             },
             Message {
@@ -2195,6 +2241,7 @@ mod tests {
                     id: "t1".into(),
                     name: "glob".into(),
                     input: json!({}),
+                    thought_signature: None,
                 }]),
             },
             Message {
@@ -2295,6 +2342,7 @@ mod tests {
                         function: OaiFunction {
                             name: "bash".into(),
                             arguments: r#"{"command":"ls"}"#.into(),
+                            thought_signature: None,
                         },
                     }]),
                 },
@@ -2305,10 +2353,16 @@ mod tests {
         let resp = translate_oai_response(oai);
         assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
         match &resp.content[0] {
-            ResponseContentBlock::ToolUse { id, name, input } => {
+            ResponseContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                thought_signature,
+            } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "bash");
                 assert_eq!(input["command"], "ls");
+                assert!(thought_signature.is_none());
             }
             _ => panic!("Expected ToolUse"),
         }
@@ -2364,6 +2418,7 @@ mod tests {
                         function: OaiFunction {
                             name: "read_file".into(),
                             arguments: r#"{"path":"/tmp/x"}"#.into(),
+                            thought_signature: None,
                         },
                     }]),
                 },
@@ -2395,6 +2450,7 @@ mod tests {
                         function: OaiFunction {
                             name: "bash".into(),
                             arguments: r#"{"command":"ls"}"#.into(),
+                            thought_signature: None,
                         },
                     }]),
                 },
@@ -2432,7 +2488,7 @@ mod tests {
 
     #[test]
     fn test_process_openai_stream_event_collects_reasoning_content() {
-        let data = r#"{"choices":[{"delta":{"reasoning_content":"think","tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":null}],"usage":null}"#;
+        let data = r#"{"choices":[{"delta":{"reasoning_content":"think","tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}","thought_signature":"sig_123"}}]},"finish_reason":null}],"usage":null}"#;
         let mut text = String::new();
         let mut reasoning_text = String::new();
         let mut stop_reason = None;
@@ -2456,6 +2512,7 @@ mod tests {
         assert_eq!(call.id, "c1");
         assert_eq!(call.name, "bash");
         assert_eq!(call.input_json, r#"{"command":"ls"}"#);
+        assert_eq!(call.thought_signature.as_deref(), Some("sig_123"));
     }
 
     #[test]
@@ -2634,6 +2691,7 @@ mod tests {
                 id: "call_1".into(),
                 name: "bash".into(),
                 input_json: r#"{"command":"ls","cwd":"/tmp"}"#.into(),
+                thought_signature: None,
             },
         );
         let resp = build_stream_response(
@@ -2645,11 +2703,17 @@ mod tests {
         );
         assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
         match &resp.content[0] {
-            ResponseContentBlock::ToolUse { id, name, input } => {
+            ResponseContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                thought_signature,
+            } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "bash");
                 assert_eq!(input["command"], "ls");
                 assert_eq!(input["cwd"], "/tmp");
+                assert!(thought_signature.is_none());
             }
             _ => panic!("Expected ToolUse"),
         }
@@ -2952,6 +3016,7 @@ mod tests {
                     id: "t1".into(),
                     name: "bash".into(),
                     input: json!({}),
+                    thought_signature: None,
                 }]),
             },
             Message {
@@ -3009,6 +3074,7 @@ mod tests {
                     id: "t1".into(),
                     name: "bash".into(),
                     input: json!({}),
+                    thought_signature: None,
                 }]),
             },
             Message {

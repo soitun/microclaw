@@ -1016,11 +1016,17 @@ pub(crate) async fn process_with_agent_impl(
                         }
                         Some(ContentBlock::Text { text: text.clone() })
                     }
-                    ResponseContentBlock::ToolUse { id, name, input } => {
+                    ResponseContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        thought_signature,
+                    } => {
                         Some(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
+                            thought_signature: thought_signature.clone(),
                         })
                     }
                     ResponseContentBlock::Other => None,
@@ -1036,7 +1042,10 @@ pub(crate) async fn process_with_agent_impl(
             let mut waiting_for_user_approval = false;
             let mut waiting_approval_tool: Option<String> = None;
             for block in &response.content {
-                if let ResponseContentBlock::ToolUse { id, name, input } = block {
+                if let ResponseContentBlock::ToolUse {
+                    id, name, input, ..
+                } = block
+                {
                     if name != "send_message" {
                         consecutive_send_message_calls = 0;
                     } else if consecutive_send_message_calls >= 3 {
@@ -2366,6 +2375,7 @@ mod tests {
                         id: "tool-bash-1".to_string(),
                         name: "bash".to_string(),
                         input: json!({"command": "printf approved"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
@@ -2417,6 +2427,7 @@ mod tests {
                         id: format!("tool-bash-retry-{idx}"),
                         name: "bash".to_string(),
                         input: json!({"command": "printf approved"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
@@ -2807,6 +2818,7 @@ mod tests {
                         id: "tool-bash-confirm".to_string(),
                         name: "bash".to_string(),
                         input: json!({"command": "printf approved"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
@@ -2865,6 +2877,7 @@ mod tests {
                         id: "tool-bash-fail".to_string(),
                         name: "bash".to_string(),
                         input: json!({"command": "git clone https://github.com/naamfung/zua.git /tmp/zua"}),
+                        thought_signature: None,
                     }],
                     stop_reason: Some("tool_use".to_string()),
                     usage: None,
