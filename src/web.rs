@@ -1172,7 +1172,7 @@ fn resolve_hook_session_key(
     if requested.is_some() && !allow_request {
         return Err((
             StatusCode::BAD_REQUEST,
-            "sessionKey override is disabled".into(),
+            "session key override is disabled".into(),
         ));
     }
     if let Some(candidate) = requested {
@@ -1180,7 +1180,7 @@ fn resolve_hook_session_key(
         if !prefixes.is_empty() && !prefixes.iter().any(|p| candidate.starts_with(p)) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "sessionKey is not allowed by configured prefixes".into(),
+                "session key is not allowed by configured prefixes".into(),
             ));
         }
         return Ok(candidate.to_string());
@@ -1500,6 +1500,7 @@ async fn api_hook_agent(
     Json(body): Json<HookAgentRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     require_hook_auth(&state, &headers)?;
+    metrics_http_inc(&state).await;
     let session_key =
         resolve_hook_session_key(&state.app_state.config, body.session_key.as_deref())?;
     // OpenClaw-compatible webhook shape:
@@ -1510,7 +1511,8 @@ async fn api_hook_agent(
         sender_name: body.sender_name.or(body.name),
         message: body.message,
     };
-    stream::api_send_stream(headers, State(state), Json(send)).await
+    stream::start_stream_run_with_actor(state, send, "hook:token".to_string(), "/hooks/agent")
+        .await
 }
 
 async fn api_hook_wake(
@@ -1519,6 +1521,7 @@ async fn api_hook_wake(
     Json(body): Json<HookWakeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     require_hook_auth(&state, &headers)?;
+    metrics_http_inc(&state).await;
     let text = body.text.trim();
     if text.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "text is required".into()));
@@ -1560,7 +1563,8 @@ async fn api_hook_wake(
         sender_name: Some(sender_name),
         message,
     };
-    stream::api_send_stream(headers, State(state), Json(send)).await
+    stream::start_stream_run_with_actor(state, send, "hook:token".to_string(), "/hooks/wake")
+        .await
 }
 
 async fn send_and_store_response(

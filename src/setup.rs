@@ -962,7 +962,7 @@ impl SetupApp {
                 },
                 Field {
                     key: web_hooks_allow_request_session_key_key().into(),
-                    label: "Web hook allow request sessionKey (optional true/false)".into(),
+                    label: "Web hook allow request session key (optional true/false)".into(),
                     value: existing
                         .get(web_hooks_allow_request_session_key_key())
                         .cloned()
@@ -972,7 +972,7 @@ impl SetupApp {
                 },
                 Field {
                     key: web_hooks_allowed_session_key_prefixes_key().into(),
-                    label: "Web hook allowed sessionKey prefixes (csv, optional)".into(),
+                    label: "Web hook allowed session key prefixes (csv, optional)".into(),
                     value: existing
                         .get(web_hooks_allowed_session_key_prefixes_key())
                         .cloned()

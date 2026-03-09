@@ -4,21 +4,24 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/test_http_hooks.sh --config <path> --hooks-token <token> [--base-url <url>]
+  scripts/test_http_hooks.sh [--config <path>] --hooks-token <token> [--base-url <url>]
 
 Examples:
+  scripts/test_http_hooks.sh --hooks-token my-hooks-secret
+
   scripts/test_http_hooks.sh \
     --config api_test_microclaw.config.yaml \
     --hooks-token my-hooks-secret
 
 Notes:
+  - Default config path: microclaw.config.yaml
   - The script starts: cargo run -- start --config <path>
   - It validates HTTP hook endpoints:
     /hooks/agent, /api/hooks/agent, /hooks/wake
 EOF
 }
 
-CONFIG_PATH=""
+CONFIG_PATH="microclaw.config.yaml"
 HOOKS_TOKEN=""
 BASE_URL="http://127.0.0.1:10961"
 
@@ -48,7 +51,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$CONFIG_PATH" || -z "$HOOKS_TOKEN" ]]; then
+if [[ -z "$HOOKS_TOKEN" ]]; then
   usage
   exit 1
 fi
@@ -56,6 +59,26 @@ fi
 if [[ ! -f "$CONFIG_PATH" ]]; then
   echo "Config file does not exist: $CONFIG_PATH" >&2
   exit 1
+fi
+
+extract_port_from_base_url() {
+  local raw="$1"
+  local no_scheme="${raw#*://}"
+  local host_port="${no_scheme%%/*}"
+  if [[ "$host_port" == *:* ]]; then
+    echo "${host_port##*:}"
+    return 0
+  fi
+  echo "80"
+}
+
+PORT="$(extract_port_from_base_url "$BASE_URL")"
+if command -v lsof >/dev/null 2>&1; then
+  existing_listener="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN -n -P 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$existing_listener" ]]; then
+    echo "Port $PORT is already in use by PID $existing_listener. Stop it and rerun." >&2
+    exit 1
+  fi
 fi
 
 LOG_FILE="$(mktemp -t microclaw-http-hooks-log.XXXXXX)"
@@ -75,6 +98,12 @@ MC_PID=$!
 echo "[2/6] Waiting for web server..."
 ready=0
 for _ in $(seq 1 90); do
+  if ! kill -0 "$MC_PID" >/dev/null 2>&1; then
+    echo "MicroClaw process exited before server became ready." >&2
+    echo "---- last logs ----" >&2
+    tail -n 100 "$LOG_FILE" >&2 || true
+    exit 1
+  fi
   code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/health" || true)"
   if [[ "$code" == "200" || "$code" == "401" ]]; then
     ready=1
@@ -145,13 +174,25 @@ if [[ -z "$run_id_alias" ]]; then
 fi
 
 echo "[5/6] Validating /hooks/wake modes"
-wake_now_resp="$(curl -sS -X POST "$BASE_URL/hooks/wake" \
-  -H "Authorization: Bearer $HOOKS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"text":"hook wake now test","mode":"now"}')"
-wake_now_run_id="$(extract_json_field "$wake_now_resp" "run_id")"
-if [[ -z "$wake_now_run_id" ]]; then
+wake_now_run_id=""
+for _ in $(seq 1 30); do
+  wake_now_resp="$(curl -sS -X POST "$BASE_URL/hooks/wake" \
+    -H "Authorization: Bearer $HOOKS_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"text":"hook wake now test","mode":"now"}')"
+  wake_now_run_id="$(extract_json_field "$wake_now_resp" "run_id")"
+  if [[ -n "$wake_now_run_id" ]]; then
+    break
+  fi
+  if [[ "$wake_now_resp" == *"too many concurrent requests for session"* ]]; then
+    sleep 1
+    continue
+  fi
   echo "Expected run_id from /hooks/wake mode=now, got: $wake_now_resp" >&2
+  exit 1
+done
+if [[ -z "$wake_now_run_id" ]]; then
+  echo "Timed out waiting for /hooks/wake mode=now to acquire run slot." >&2
   exit 1
 fi
 
