@@ -115,6 +115,10 @@ fn telegram_allowed_user_ids_key() -> &'static str {
     "TELEGRAM_ALLOWED_USER_IDS"
 }
 
+fn telegram_topic_routing_key() -> &'static str {
+    "TELEGRAM_TOPIC_ROUTING"
+}
+
 fn web_hooks_token_key() -> &'static str {
     "WEB_HOOKS_TOKEN"
 }
@@ -1008,6 +1012,16 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
+                    key: telegram_topic_routing_key().into(),
+                    label: "Telegram topic routing (optional true/false)".into(),
+                    value: existing
+                        .get(telegram_topic_routing_key())
+                        .cloned()
+                        .unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
                     key: telegram_llm_provider_key().into(),
                     label: "Telegram LLM provider override (optional)".into(),
                     value: existing
@@ -1661,6 +1675,14 @@ impl SetupApp {
                                 .join(",")
                         })
                         .unwrap_or_default();
+                    let telegram_topic_routing = config
+                        .channels
+                        .get("telegram")
+                        .and_then(|ch_cfg| ch_cfg.get("topic_routing"))
+                        .and_then(|v| v.get("enabled"))
+                        .and_then(|v| v.as_bool())
+                        .map(|b| b.to_string())
+                        .unwrap_or_default();
                     let telegram_llm_provider = config
                         .channels
                         .get("telegram")
@@ -1788,6 +1810,10 @@ impl SetupApp {
                     map.insert(
                         telegram_allowed_user_ids_key().into(),
                         telegram_allowed_user_ids.clone(),
+                    );
+                    map.insert(
+                        telegram_topic_routing_key().into(),
+                        telegram_topic_routing.clone(),
                     );
                     map.insert(
                         telegram_llm_provider_key().into(),
@@ -2605,7 +2631,9 @@ impl SetupApp {
             | "WEB_HOOKS_DEFAULT_SESSION_KEY"
             | "WEB_HOOKS_ALLOW_REQUEST_SESSION_KEY"
             | "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES" => self.channel_enabled("web"),
-            "TELEGRAM_MODEL" | "TELEGRAM_ALLOWED_USER_IDS" => self.channel_enabled("telegram"),
+            "TELEGRAM_MODEL" | "TELEGRAM_ALLOWED_USER_IDS" | "TELEGRAM_TOPIC_ROUTING" => {
+                self.channel_enabled("telegram")
+            }
             "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "TELEGRAM_ACCOUNT_ID" => false,
             "TELEGRAM_LLM_PROVIDER" | "TELEGRAM_LLM_API_KEY" | "TELEGRAM_LLM_BASE_URL" => false,
             _ if key == telegram_bot_count_key() => self.channel_enabled("telegram"),
@@ -2898,6 +2926,15 @@ impl SetupApp {
                 &self.field_value(telegram_bot_count_key()),
                 telegram_bot_count_key(),
             )?;
+            let topic_routing_raw = self.field_value(telegram_topic_routing_key());
+            if !topic_routing_raw.trim().is_empty() {
+                let _ = parse_boolish(&topic_routing_raw, false).map_err(|_| {
+                    MicroClawError::Config(format!(
+                        "{} must be true/false (or 1/0)",
+                        telegram_topic_routing_key()
+                    ))
+                })?;
+            }
             parse_i64_list_field(
                 &self.field_value(telegram_allowed_user_ids_key()),
                 telegram_allowed_user_ids_key(),
@@ -3641,6 +3678,7 @@ impl SetupApp {
             | "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES"
             | "TELEGRAM_MODEL"
             | "TELEGRAM_ALLOWED_USER_IDS"
+            | "TELEGRAM_TOPIC_ROUTING"
             | "TELEGRAM_LLM_PROVIDER"
             | "TELEGRAM_LLM_API_KEY"
             | "TELEGRAM_LLM_BASE_URL"
@@ -3751,6 +3789,7 @@ impl SetupApp {
             | "TELEGRAM_ACCOUNT_ID"
             | "TELEGRAM_MODEL"
             | "TELEGRAM_ALLOWED_USER_IDS"
+            | "TELEGRAM_TOPIC_ROUTING"
             | "TELEGRAM_LLM_PROVIDER"
             | "TELEGRAM_LLM_API_KEY"
             | "TELEGRAM_LLM_BASE_URL"
@@ -3973,9 +4012,10 @@ impl SetupApp {
             _ if key == telegram_bot_count_key() => ORDER_CHANNEL_BASE + 13,
             "TELEGRAM_MODEL" => ORDER_CHANNEL_BASE + 14,
             "TELEGRAM_ALLOWED_USER_IDS" => ORDER_CHANNEL_BASE + 15,
-            "TELEGRAM_LLM_PROVIDER" => ORDER_CHANNEL_BASE + 16,
-            "TELEGRAM_LLM_API_KEY" => ORDER_CHANNEL_BASE + 17,
-            "TELEGRAM_LLM_BASE_URL" => ORDER_CHANNEL_BASE + 18,
+            "TELEGRAM_TOPIC_ROUTING" => ORDER_CHANNEL_BASE + 16,
+            "TELEGRAM_LLM_PROVIDER" => ORDER_CHANNEL_BASE + 17,
+            "TELEGRAM_LLM_API_KEY" => ORDER_CHANNEL_BASE + 18,
+            "TELEGRAM_LLM_BASE_URL" => ORDER_CHANNEL_BASE + 19,
             "DISCORD_BOT_TOKEN" => ORDER_CHANNEL_BASE + 900,
             "DISCORD_ACCOUNT_ID" => ORDER_CHANNEL_BASE + 901,
             "DISCORD_MODEL" => ORDER_CHANNEL_BASE + 902,
@@ -4457,6 +4497,17 @@ fn save_config_yaml(
     } else {
         get(&telegram_slot_model_key(1))
     };
+    let telegram_topic_routing_raw = get(telegram_topic_routing_key());
+    let telegram_topic_routing = if telegram_topic_routing_raw.trim().is_empty() {
+        false
+    } else {
+        parse_boolish(telegram_topic_routing_raw.trim(), false).map_err(|_| {
+            MicroClawError::Config(format!(
+                "{} must be true/false (or 1/0)",
+                telegram_topic_routing_key()
+            ))
+        })?
+    };
     let telegram_llm_provider = get(telegram_llm_provider_key());
     let telegram_llm_api_key = get(telegram_llm_api_key_key());
     let telegram_llm_base_url = get(telegram_llm_base_url_key());
@@ -4676,6 +4727,10 @@ fn save_config_yaml(
         }
         if !telegram_model.trim().is_empty() {
             yaml.push_str(&format!("    model: \"{}\"\n", telegram_model.trim()));
+        }
+        if !telegram_topic_routing_raw.trim().is_empty() {
+            yaml.push_str("    topic_routing:\n");
+            yaml.push_str(&format!("      enabled: {}\n", telegram_topic_routing));
         }
         if !telegram_channel_allowed_user_ids.is_empty() {
             yaml.push_str("    allowed_user_ids:\n");
@@ -5974,6 +6029,38 @@ channels:
     }
 
     #[test]
+    fn test_setup_loads_existing_telegram_topic_routing() {
+        let _guard = env_lock();
+        let temp = std::env::temp_dir().join(format!(
+            "microclaw_setup_load_telegram_topic_routing_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp).unwrap();
+        std::fs::write(
+            temp.join("microclaw.config.yaml"),
+            r#"
+bot_username: bot
+api_key: key
+channels:
+  telegram:
+    enabled: true
+    topic_routing:
+      enabled: true
+"#,
+        )
+        .unwrap();
+
+        let app = SetupApp::new();
+        assert_eq!(app.field_value(telegram_topic_routing_key()), "true");
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        let _ = std::fs::remove_file(temp.join("microclaw.config.yaml"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn test_save_config_yaml() {
         let yaml_path = std::env::temp_dir().join(format!(
             "microclaw_setup_test_{}.yaml",
@@ -5985,6 +6072,7 @@ channels:
         values.insert("TELEGRAM_BOT_TOKEN".into(), "new_tok".into());
         values.insert("BOT_USERNAME".into(), "new_bot".into());
         values.insert("TELEGRAM_ACCOUNT_ID".into(), "sales".into());
+        values.insert(telegram_topic_routing_key().into(), "true".into());
         values.insert("LLM_PROVIDER".into(), "anthropic".into());
         values.insert("LLM_API_KEY".into(), "key".into());
         values.insert("SANDBOX_ENABLED".into(), "true".into());
@@ -6002,6 +6090,8 @@ channels:
         assert!(s.contains("        enabled: true\n"));
         assert!(s.contains("        bot_token: \"new_tok\"\n"));
         assert!(s.contains("        bot_username: \"new_bot\"\n"));
+        assert!(s.contains("    topic_routing:\n"));
+        assert!(s.contains("      enabled: true\n"));
         assert!(s.contains("  web:\n"));
         assert!(s.contains("    enabled: true\n"));
         assert!(s.contains("llm_provider: \"anthropic\""));
