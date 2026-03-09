@@ -132,6 +132,14 @@ pub struct TelegramChannelConfig {
     pub default_account: Option<String>,
     #[serde(default)]
     pub streaming: TelegramStreamingConfig,
+    #[serde(default)]
+    pub topic_routing: TelegramTopicRoutingConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TelegramTopicRoutingConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 pub struct TelegramAdapter {
@@ -180,6 +188,24 @@ impl TelegramAdapter {
             (Some(head), Some(tail))
         }
     }
+
+    fn parse_telegram_external_chat_id(
+        external_chat_id: &str,
+    ) -> Result<(ChatId, Option<ThreadId>), String> {
+        let (raw_chat_id, thread_id) = match external_chat_id.split_once(':') {
+            Some((chat, thread)) => {
+                let parsed_thread = thread.parse::<i32>().map_err(|_| {
+                    format!("Invalid Telegram external_chat_id '{}'", external_chat_id)
+                })?;
+                (chat, Some(ThreadId(MessageId(parsed_thread))))
+            }
+            None => (external_chat_id, None),
+        };
+        let parsed_chat = raw_chat_id
+            .parse::<i64>()
+            .map_err(|_| format!("Invalid Telegram external_chat_id '{}'", external_chat_id))?;
+        Ok((ChatId(parsed_chat), thread_id))
+    }
 }
 
 #[async_trait]
@@ -202,10 +228,9 @@ impl ChannelAdapter for TelegramAdapter {
     }
 
     async fn send_text(&self, external_chat_id: &str, text: &str) -> Result<(), String> {
-        let telegram_chat_id = external_chat_id
-            .parse::<i64>()
-            .map_err(|_| format!("Invalid Telegram external_chat_id '{}'", external_chat_id))?;
-        send_response(&self.bot, ChatId(telegram_chat_id), text, None).await;
+        let (telegram_chat_id, thread_id) =
+            Self::parse_telegram_external_chat_id(external_chat_id)?;
+        send_response(&self.bot, telegram_chat_id, text, thread_id).await;
         Ok(())
     }
 
@@ -215,16 +240,18 @@ impl ChannelAdapter for TelegramAdapter {
         file_path: &Path,
         caption: Option<&str>,
     ) -> Result<String, String> {
-        let telegram_chat_id = external_chat_id
-            .parse::<i64>()
-            .map_err(|_| format!("Invalid Telegram external_chat_id '{}'", external_chat_id))?;
+        let (telegram_chat_id, thread_id) =
+            Self::parse_telegram_external_chat_id(external_chat_id)?;
 
         let (caption_for_attachment, overflow_text) = Self::split_telegram_caption(caption);
 
         if Self::is_likely_image(file_path) {
             let mut req = self
                 .bot
-                .send_photo(ChatId(telegram_chat_id), InputFile::file(file_path));
+                .send_photo(telegram_chat_id, InputFile::file(file_path));
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
             if let Some(c) = &caption_for_attachment {
                 req = req.caption(c.clone());
             }
@@ -233,7 +260,10 @@ impl ChannelAdapter for TelegramAdapter {
         } else {
             let mut req = self
                 .bot
-                .send_document(ChatId(telegram_chat_id), InputFile::file(file_path));
+                .send_document(telegram_chat_id, InputFile::file(file_path));
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
             if let Some(c) = &caption_for_attachment {
                 req = req.caption(c.clone());
             }
@@ -242,7 +272,7 @@ impl ChannelAdapter for TelegramAdapter {
         }
 
         if let Some(extra) = overflow_text {
-            send_response(&self.bot, ChatId(telegram_chat_id), &extra, None).await;
+            send_response(&self.bot, telegram_chat_id, &extra, thread_id).await;
         }
 
         Ok(match caption {
@@ -280,6 +310,7 @@ pub struct TelegramRuntimeContext {
     pub allowed_user_ids: Vec<i64>,
     pub model: Option<String>,
     pub streaming: TelegramStreamingConfig,
+    pub topic_routing_enabled: bool,
 }
 
 pub fn build_telegram_runtime_contexts(
@@ -362,6 +393,7 @@ pub fn build_telegram_runtime_contexts(
                 allowed_user_ids,
                 model,
                 streaming: tg_cfg.streaming.clone(),
+                topic_routing_enabled: tg_cfg.topic_routing.enabled,
             },
         ));
     }
@@ -386,6 +418,7 @@ pub fn build_telegram_runtime_contexts(
                     .filter(|v| !v.is_empty())
                     .map(ToOwned::to_owned),
                 streaming: tg_cfg.streaming.clone(),
+                topic_routing_enabled: tg_cfg.topic_routing.enabled,
             },
         ));
     }
@@ -489,6 +522,20 @@ fn check_private_chat_access(
     true
 }
 
+fn telegram_external_chat_id(
+    raw_chat_id: i64,
+    thread_id: Option<ThreadId>,
+    topic_routing_enabled: bool,
+) -> String {
+    if topic_routing_enabled {
+        if let Some(tid) = thread_id {
+            let ThreadId(MessageId(thread_message_id)) = tid;
+            return format!("{raw_chat_id}:{thread_message_id}");
+        }
+    }
+    raw_chat_id.to_string()
+}
+
 async fn handle_message(
     bot: Bot,
     msg: teloxide::types::Message,
@@ -517,6 +564,7 @@ async fn handle_message(
     let tg_bot_user_id = tg_ctx.bot_user_id;
     let tg_allowed_groups = tg_ctx.allowed_groups.clone();
     let tg_allowed_user_ids = tg_ctx.allowed_user_ids.clone();
+    let tg_topic_routing_enabled = tg_ctx.topic_routing_enabled;
     let sender_user_id = msg.from.as_ref().and_then(|u| i64::try_from(u.id.0).ok());
 
     // Security Check: Enforce allowlist for private chats early
@@ -597,7 +645,8 @@ async fn handle_message(
             return Ok(());
         }
         let sender_id_text = sender_user_id.map(|v| v.to_string());
-        let external_chat_id = raw_chat_id.to_string();
+        let external_chat_id =
+            telegram_external_chat_id(raw_chat_id, msg.thread_id, tg_topic_routing_enabled);
         let chat_title_for_lookup = chat_title.clone();
         let chat_type_for_lookup = db_chat_type.to_string();
         let channel_name = tg_channel_name.clone();
@@ -820,7 +869,8 @@ async fn handle_message(
         && !tg_allowed_groups.is_empty()
         && !tg_allowed_groups.contains(&raw_chat_id)
     {
-        let external_chat_id = raw_chat_id.to_string();
+        let external_chat_id =
+            telegram_external_chat_id(raw_chat_id, msg.thread_id, tg_topic_routing_enabled);
         let chat_title_for_lookup = chat_title.clone();
         let chat_type_for_lookup = db_chat_type.to_string();
         let channel_name = tg_channel_name.clone();
@@ -871,7 +921,8 @@ async fn handle_message(
         return Ok(());
     }
 
-    let external_chat_id = raw_chat_id.to_string();
+    let external_chat_id =
+        telegram_external_chat_id(raw_chat_id, msg.thread_id, tg_topic_routing_enabled);
     let chat_title_for_lookup = chat_title.clone();
     let chat_type_for_lookup = db_chat_type.to_string();
     let channel_name = tg_channel_name.clone();
@@ -2278,12 +2329,14 @@ mod tests {
         assert_eq!(runtimes[0].1.bot_username, "global_bot");
         assert_eq!(runtimes[0].1.allowed_groups, vec![202]);
         assert_eq!(runtimes[0].1.allowed_user_ids, vec![11]);
+        assert!(!runtimes[0].1.topic_routing_enabled);
 
         assert_eq!(runtimes[1].0, "tg_sales");
         assert_eq!(runtimes[1].1.channel_name, "telegram");
         assert_eq!(runtimes[1].1.bot_username, "sales_bot");
         assert_eq!(runtimes[1].1.allowed_groups, vec![101]);
         assert_eq!(runtimes[1].1.allowed_user_ids, vec![11, 1001]);
+        assert!(!runtimes[1].1.topic_routing_enabled);
     }
 
     #[test]
@@ -2302,6 +2355,40 @@ mod tests {
         assert_eq!(runtimes[0].1.bot_username, "legacy_bot");
         assert_eq!(runtimes[0].1.allowed_groups, vec![7, 8]);
         assert_eq!(runtimes[0].1.allowed_user_ids, vec![42, 43]);
+        assert!(!runtimes[0].1.topic_routing_enabled);
+    }
+
+    #[test]
+    fn test_build_telegram_runtime_contexts_topic_routing_enabled() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.bot_username = "global_bot".to_string();
+        cfg.channels = serde_yaml::from_str(
+            r#"telegram: { enabled: true, bot_token: "legacy_tg", bot_username: "legacy_bot", topic_routing: { enabled: true } }"#,
+        )
+        .unwrap();
+
+        let runtimes = build_telegram_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 1);
+        assert!(runtimes[0].1.topic_routing_enabled);
+    }
+
+    #[test]
+    fn test_telegram_external_chat_id_topic_routing() {
+        let raw_chat_id = -100123_i64;
+        let thread_id = Some(teloxide::types::ThreadId(teloxide::types::MessageId(456)));
+
+        assert_eq!(
+            telegram_external_chat_id(raw_chat_id, thread_id, true),
+            "-100123:456"
+        );
+        assert_eq!(
+            telegram_external_chat_id(raw_chat_id, thread_id, false),
+            "-100123"
+        );
+        assert_eq!(
+            telegram_external_chat_id(raw_chat_id, None, true),
+            "-100123"
+        );
     }
 
     #[test]
