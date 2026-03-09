@@ -1,5 +1,9 @@
 pub fn default_llm_user_agent() -> String {
-    format!("MicroClaw/{}", env!("CARGO_PKG_VERSION"))
+    let raw = env!("CARGO_PKG_VERSION");
+    let mut parts = raw.split('.');
+    let major = parts.next().unwrap_or(raw);
+    let minor = parts.next().unwrap_or("0");
+    format!("MicroClaw/{major}.{minor}")
 }
 
 /// Returns the User-Agent string used for outbound LLM HTTP calls.
