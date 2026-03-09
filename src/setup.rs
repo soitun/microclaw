@@ -1050,10 +1050,7 @@ impl SetupApp {
                 Field {
                     key: "LLM_USER_AGENT".into(),
                     label: "LLM user-agent (optional)".into(),
-                    value: existing
-                        .get("LLM_USER_AGENT")
-                        .cloned()
-                        .unwrap_or_else(crate::http_client::default_llm_user_agent),
+                    value: existing.get("LLM_USER_AGENT").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
                 },
@@ -3493,7 +3490,7 @@ impl SetupApp {
             "LLM_BASE_URL" => find_provider_preset(&provider)
                 .map(|p| p.default_base_url.to_string())
                 .unwrap_or_default(),
-            "LLM_USER_AGENT" => crate::http_client::default_llm_user_agent(),
+            "LLM_USER_AGENT" => String::new(),
             "SHOW_THINKING" => "false".into(),
             "DATA_DIR" => default_data_dir_for_setup(),
             "OVERRIDE_TIMEZONE" => String::new(),
