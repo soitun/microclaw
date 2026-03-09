@@ -106,6 +106,8 @@ pub struct TelegramAccountConfig {
     pub allowed_user_ids: Vec<i64>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub topic_routing: Option<TelegramTopicRoutingConfig>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -383,6 +385,11 @@ pub fn build_telegram_runtime_contexts(
                     .filter(|v| !v.is_empty())
                     .map(ToOwned::to_owned)
             });
+        let topic_routing_enabled = account_cfg
+            .topic_routing
+            .as_ref()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(tg_cfg.topic_routing.enabled);
         runtimes.push((
             account_cfg.bot_token.clone(),
             TelegramRuntimeContext {
@@ -393,7 +400,7 @@ pub fn build_telegram_runtime_contexts(
                 allowed_user_ids,
                 model,
                 streaming: tg_cfg.streaming.clone(),
-                topic_routing_enabled: tg_cfg.topic_routing.enabled,
+                topic_routing_enabled,
             },
         ));
     }
@@ -2370,6 +2377,21 @@ mod tests {
         let runtimes = build_telegram_runtime_contexts(&cfg);
         assert_eq!(runtimes.len(), 1);
         assert!(runtimes[0].1.topic_routing_enabled);
+    }
+
+    #[test]
+    fn test_build_telegram_runtime_contexts_account_topic_routing_override() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.bot_username = "global_bot".to_string();
+        cfg.channels = serde_yaml::from_str(
+            r#"telegram: { enabled: true, topic_routing: { enabled: false }, default_account: "main", accounts: { main: { enabled: true, bot_token: "tg_main", bot_username: "main_bot" }, ops: { enabled: true, bot_token: "tg_ops", topic_routing: { enabled: true } } } }"#,
+        )
+        .unwrap();
+
+        let runtimes = build_telegram_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 2);
+        assert!(!runtimes[0].1.topic_routing_enabled);
+        assert!(runtimes[1].1.topic_routing_enabled);
     }
 
     #[test]

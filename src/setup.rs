@@ -99,6 +99,10 @@ fn telegram_slot_allowed_user_ids_key(slot: usize) -> String {
     format!("TELEGRAM_BOT{}_ALLOWED_USER_IDS", slot)
 }
 
+fn telegram_slot_topic_routing_key(slot: usize) -> String {
+    format!("TELEGRAM_BOT{}_TOPIC_ROUTING", slot)
+}
+
 fn default_slot_account_id(slot: usize) -> String {
     if slot <= 1 {
         default_account_id().to_string()
@@ -1392,6 +1396,18 @@ impl SetupApp {
                 required: false,
                 secret: false,
             });
+            app.fields.push(Field {
+                key: telegram_slot_topic_routing_key(slot),
+                label: format!(
+                    "Telegram bot #{slot}: topic routing override (optional true/false)"
+                ),
+                value: existing
+                    .get(&telegram_slot_topic_routing_key(slot))
+                    .cloned()
+                    .unwrap_or_default(),
+                required: false,
+                secret: false,
+            });
         }
 
         // Generate fields for dynamic channels (slack, feishu, etc.)
@@ -1917,6 +1933,16 @@ impl SetupApp {
                                                 ids.join(","),
                                             );
                                         }
+                                    }
+                                    if let Some(v) = account
+                                        .get("topic_routing")
+                                        .and_then(|v| v.get("enabled"))
+                                        .and_then(|v| v.as_bool())
+                                    {
+                                        map.insert(
+                                            telegram_slot_topic_routing_key(slot),
+                                            v.to_string(),
+                                        );
                                     }
                                 }
                             }
@@ -2525,12 +2551,24 @@ impl SetupApp {
                 &allowed_user_ids_raw,
                 &telegram_slot_allowed_user_ids_key(slot),
             )?;
+            let topic_routing_raw = self.field_value(&telegram_slot_topic_routing_key(slot));
+            let topic_routing_enabled = if topic_routing_raw.trim().is_empty() {
+                None
+            } else {
+                Some(parse_boolish(&topic_routing_raw, false).map_err(|_| {
+                    MicroClawError::Config(format!(
+                        "{} must be true/false (or 1/0)",
+                        telegram_slot_topic_routing_key(slot)
+                    ))
+                })?)
+            };
             let enabled = parse_boolish(&self.field_value(&telegram_slot_enabled_key(slot)), true)?;
             let has_any = !token.is_empty()
                 || !username.is_empty()
                 || !model.is_empty()
                 || !soul_path.is_empty()
-                || !allowed_user_ids.is_empty();
+                || !allowed_user_ids.is_empty()
+                || topic_routing_enabled.is_some();
             if !has_any {
                 continue;
             }
@@ -2577,6 +2615,12 @@ impl SetupApp {
                             .map(|id| serde_json::Value::Number(id.into()))
                             .collect(),
                     ),
+                );
+            }
+            if let Some(enabled) = topic_routing_enabled {
+                account.insert(
+                    "topic_routing".to_string(),
+                    serde_json::json!({ "enabled": enabled }),
                 );
             }
             out.insert(account_id, serde_json::Value::Object(account));
@@ -2649,6 +2693,7 @@ impl SetupApp {
                         || key == telegram_slot_model_key(slot)
                         || key == telegram_slot_soul_path_key(slot)
                         || key == telegram_slot_allowed_user_ids_key(slot)
+                        || key == telegram_slot_topic_routing_key(slot)
                     {
                         return slot <= self.telegram_bot_count();
                     }
@@ -4047,6 +4092,9 @@ impl SetupApp {
                     if key == telegram_slot_allowed_user_ids_key(slot) {
                         return base + 7;
                     }
+                    if key == telegram_slot_topic_routing_key(slot) {
+                        return base + 8;
+                    }
                 }
                 usize::MAX
             }
@@ -4530,12 +4578,26 @@ fn save_config_yaml(
             &allowed_user_ids_raw,
             &telegram_slot_allowed_user_ids_key(slot),
         )?;
+        let slot_topic_routing_raw = get(&telegram_slot_topic_routing_key(slot));
+        let slot_topic_routing_enabled = if slot_topic_routing_raw.trim().is_empty() {
+            None
+        } else {
+            Some(
+                parse_boolish(slot_topic_routing_raw.trim(), false).map_err(|_| {
+                    MicroClawError::Config(format!(
+                        "{} must be true/false (or 1/0)",
+                        telegram_slot_topic_routing_key(slot)
+                    ))
+                })?,
+            )
+        };
         let enabled = parse_boolish(&get(&telegram_slot_enabled_key(slot)), true)?;
         let has_any = !token.trim().is_empty()
             || !username.trim().is_empty()
             || !model.trim().is_empty()
             || !soul_path.is_empty()
-            || !allowed_user_ids.is_empty();
+            || !allowed_user_ids.is_empty()
+            || slot_topic_routing_enabled.is_some();
         if !has_any {
             continue;
         }
@@ -4564,6 +4626,12 @@ fn save_config_yaml(
             account.insert(
                 "model".into(),
                 serde_json::Value::String(model.trim().to_string()),
+            );
+        }
+        if let Some(enabled) = slot_topic_routing_enabled {
+            account.insert(
+                "topic_routing".into(),
+                serde_json::json!({ "enabled": enabled }),
             );
         }
         if !soul_path.is_empty() {
@@ -6249,6 +6317,7 @@ channels:
         values.insert(telegram_slot_enabled_key(2), "true".into());
         values.insert(telegram_slot_token_key(2), "tg_ops".into());
         values.insert(telegram_slot_username_key(2), "tg_ops_bot".into());
+        values.insert(telegram_slot_topic_routing_key(2), "true".into());
         values.insert("TELEGRAM_ACCOUNT_ID".into(), "main".into());
         values.insert(
             "DISCORD_ACCOUNTS_JSON".into(),
@@ -6266,6 +6335,8 @@ channels:
         assert!(s.contains("        bot_token: tg_main\n"));
         assert!(s.contains("      ops:\n"));
         assert!(s.contains("        bot_token: tg_ops\n"));
+        assert!(s.contains("        topic_routing:\n"));
+        assert!(s.contains("          enabled: true\n"));
         assert!(s.contains("  discord:\n"));
         assert!(s.contains("        bot_token: dc_main\n"));
         assert!(s.contains("        allowed_channels:\n"));
@@ -6404,6 +6475,7 @@ sandbox:
             telegram_slot_token_key(1),
             telegram_slot_username_key(1),
             telegram_slot_allowed_user_ids_key(1),
+            telegram_slot_topic_routing_key(1),
             "DISCORD_BOT_TOKEN".to_string(),
             "DISCORD_ACCOUNT_ID".to_string(),
             dynamic_bot_count_field_key("feishu"),
@@ -6435,6 +6507,7 @@ sandbox:
             telegram_slot_token_key(1),
             telegram_slot_username_key(1),
             telegram_slot_allowed_user_ids_key(1),
+            telegram_slot_topic_routing_key(1),
             dynamic_bot_count_field_key("feishu"),
             dynamic_slot_id_field_key("feishu", 1),
             dynamic_slot_field_key("feishu", 1, "app_id"),
