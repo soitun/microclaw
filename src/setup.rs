@@ -3134,7 +3134,7 @@ impl SetupApp {
     }
 
     fn llm_provider_preset_choices(&self, current: &str) -> Vec<(String, String)> {
-        let mut options = vec![("0 - main (global default)".to_string(), String::new())];
+        let mut options = vec![("main (global default)".to_string(), String::new())];
         let mut presets: Vec<(String, LlmProviderProfile)> =
             self.llm_provider_presets().into_iter().collect();
         presets.sort_by(|a, b| a.0.cmp(&b.0));
@@ -6584,9 +6584,9 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
         } else if let Some(provider_key) = SetupApp::llm_provider_key_for_model_field(&f.key) {
             let provider = app.field_value(&provider_key);
             if provider.is_empty() {
-                "preset=main".to_string()
+                "main".to_string()
             } else {
-                format!("preset={provider}")
+                provider
             }
         } else if f.key == llm_provider_profiles_key() {
             let presets = app.llm_provider_presets();
