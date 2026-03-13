@@ -4,6 +4,7 @@
 
 [![Website](https://img.shields.io/badge/Website-microclaw.ai-blue)](https://microclaw.ai)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pvmezwkAk5)
+[![Reddit](https://img.shields.io/badge/Reddit-r%2Fmicroclaw-FF4500?logo=reddit&logoColor=white)](https://www.reddit.com/r/microclaw/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 
@@ -11,11 +12,36 @@
   <img src="screenshots/headline.png" alt="MicroClaw headline logo" width="92%" />
 </p>
 
+<p align="center">
+  <strong>一个可运行在 Telegram、Discord、Slack、飞书、IRC、Web 等渠道上的统一智能体运行时。</strong><br />
+  支持多步工具调用、持久化记忆、定时任务、技能系统、MCP，以及本地 Web 控制台。
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> |
+  <a href="#安装">安装</a> |
+  <a href="#为什么选择-microclaw">为什么选择 MicroClaw</a> |
+  <a href="#工作原理">架构</a> |
+  <a href="#文档">文档</a>
+</p>
+
+<p align="center">
+  <strong>快速入口：</strong>
+  <a href="docs/generated/tools.md">工具参考</a> ·
+  <a href="docs/generated/config-defaults.md">配置默认值</a> ·
+  <a href="docs/generated/provider-matrix.md">Provider 矩阵</a> ·
+  <a href="docs/operations/runbook.md">运行手册</a> ·
+  <a href="docs/operations/http-hook-trigger.md">Web Hook</a> ·
+  <a href="docs/clawhub/overview.md">ClawHub</a>
+</p>
+
 
 > **注意：** 本项目正在积极开发中，功能可能会变化，欢迎贡献！
 
 
-一个住在聊天平台里的 AI 智能助手，灵感来自 [nanoclaw](https://github.com/gavrielc/nanoclaw/)，参考了 nanoclaw 的部分思路。MicroClaw 采用“渠道无关核心 + 平台适配器”架构：当前支持 Telegram、Discord、Slack、飞书/Lark、Matrix、WhatsApp、iMessage、Email、Nostr、Signal、DingTalk、QQ、IRC 和 Web，后续可持续扩展更多平台。它支持完整的工具执行：运行 Shell 命令、读写编辑文件、搜索代码库、浏览网页、定时任务、持久化记忆等。
+MicroClaw 是一个面向聊天渠道的智能体运行时。它提供统一的渠道无关 agent loop、provider 无关的 LLM 抽象层，以及可以跨 Telegram、Discord、Slack、飞书/Lark、IRC、Web 等渠道复用的持久化运行时。
+
+它支持 Anthropic 和 OpenAI-compatible provider，具备多步工具调用、跨轮次会话恢复、持久化记忆、定时任务，以及同时通过聊天渠道和本地 Web UI 暴露同一套运行时能力。
 
 
 <p align="center">
@@ -24,53 +50,47 @@
   <img src="screenshots/screenshot2.png" width="45%" />
 </p>
 
-## 目录
+## 为什么选择 MicroClaw
 
-- [MicroClaw](#microclaw)
-  - [目录](#目录)
-  - [安装](#安装)
-    - [一键安装（推荐）](#一键安装推荐)
-    - [Windows PowerShell 安装](#windows-powershell-安装)
-    - [预检诊断（doctor）](#预检诊断doctor)
-    - [卸载（脚本）](#卸载脚本)
-    - [Homebrew (macOS)](#homebrew-macos)
-    - [从源码构建](#从源码构建)
-  - [工作原理](#工作原理)
-  - [博客文章](#博客文章)
-  - [功能特性](#功能特性)
-  - [工具列表](#工具列表)
-  - [记忆系统](#记忆系统)
-    - [聊天身份映射（channel + chat id）](#聊天身份映射channel--chat-id)
-  - [技能系统](#技能系统)
-  - [MCP](#mcp)
-    - [在 macOS 上接入 Peekaboo MCP（桌面自动化）](#在-macos-上接入-peekaboo-mcp桌面自动化)
-    - [Windows 上的类似方案](#windows-上的类似方案)
-  - [计划与执行](#计划与执行)
-  - [定时任务](#定时任务)
-  - [本地 Web UI（跨渠道历史）](#本地-web-ui跨渠道历史)
-    - [HTTP 请求触发（自动化 / 无头调用）](#http-请求触发自动化--无头调用)
-  - [发布](#发布)
-  - [配置](#配置)
-    - [1. 创建渠道机器人凭据](#1-创建渠道机器人凭据)
-    - [2. 获取 LLM API Key](#2-获取-llm-api-key)
-    - [3. 配置（推荐：交互式问答）](#3-配置推荐交互式问答)
-    - [4. 运行](#4-运行)
-    - [5. 作为常驻 gateway 服务运行（可选）](#5-作为常驻-gateway-服务运行可选)
-  - [配置项](#配置项)
-  - [Docker 沙箱](#docker-沙箱)
-    - [支持的 `llm_provider` 值](#支持的-llm_provider-值)
-  - [平台行为](#平台行为)
-  - [多聊天权限模型](#多聊天权限模型)
-  - [使用示例](#使用示例)
-  - [新增平台适配器（Adding a New Platform Adapter）](#新增平台适配器adding-a-new-platform-adapter)
-  - [Star History](#star-history)
-  - [Contributors](#contributors)
-  - [可观测性 (Langfuse)](#可观测性-langfuse)
-    - [5 分钟快速上手（第一次使用推荐）](#5-分钟快速上手第一次使用推荐)
-    - [推荐配置](#推荐配置)
-    - [如何确认接入成功](#如何确认接入成功)
-    - [常见踩坑与排障](#常见踩坑与排障)
-  - [许可证](#许可证)
+- **一套运行时，多种渠道复用**：同一套 agent loop、工具、记忆和策略可以跨聊天平台工作。
+- **为 agentic execution 而设计**：工具调用、工具结果反思、子代理、任务规划和中间进度消息都是一等能力。
+- **默认持久化**：会话可恢复、记忆可跨重启保留、定时任务可长期后台运行。
+- **Provider 无锁定**：可接 Anthropic 或 OpenAI-compatible API，不需要重写运行时。
+- **关键扩展点完整**：技能、MCP、插件、Hook、新平台适配器都能在不替换核心的情况下接入。
+
+## 快速开始
+
+安装：
+
+```sh
+curl -fsSL https://microclaw.ai/install.sh | bash
+```
+
+运行诊断：
+
+```sh
+microclaw doctor
+```
+
+使用交互式向导生成配置：
+
+```sh
+microclaw setup
+```
+
+启动运行时：
+
+```sh
+microclaw start
+```
+
+默认本地 Web UI：
+
+```text
+http://127.0.0.1:10961
+```
+
+如果你想看源码安装方式，直接跳到 [安装](#安装)。如果你更关心部署和运维，建议先看 [配置](#配置) 和 [文档](#文档)。
 
 ## 安装
 
@@ -168,7 +188,14 @@ sqlite3 <data_dir>/runtime/microclaw.db "SELECT id, chat_id, chat_channel, exter
 
 ## 工作原理
 
-每条消息触发一个 **智能体循环**：模型可以调用工具、检查结果、再调用更多工具，经过多步推理后再回复。默认每次请求最多 100 次迭代。
+每条消息都会进入统一的 **agent loop**：
+
+1. 加载文件记忆、结构化记忆、技能和可恢复的会话状态
+2. 使用工具 schema 和运行时上下文调用所配置的模型
+3. 执行工具调用，追加结果，并持续循环直到任务结束
+4. 持久化更新后的会话、记忆信号和可观测性数据
+
+这样可以让交互式聊天、定时任务、Web 触发自动化、子代理执行等能力共享同一套运行时行为。
 
 <p align="center">
   <img src="docs/assets/readme/microclaw-architecture.svg" alt="MicroClaw 架构总览" width="96%" />

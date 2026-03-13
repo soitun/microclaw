@@ -5,6 +5,7 @@
 
 [![Website](https://img.shields.io/badge/Website-microclaw.ai-blue)](https://microclaw.ai)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pvmezwkAk5)
+[![Reddit](https://img.shields.io/badge/Reddit-r%2Fmicroclaw-FF4500?logo=reddit&logoColor=white)](https://www.reddit.com/r/microclaw/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 
@@ -12,12 +13,36 @@
   <img src="screenshots/headline.png" alt="MicroClaw headline logo" width="92%" />
 </p>
 
+<p align="center">
+  <strong>One agent runtime for Telegram, Discord, Slack, Feishu, IRC, Web, and more.</strong><br />
+  Multi-step tool use, persistent memory, scheduled tasks, skills, MCP, and a local web control plane.
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> |
+  <a href="#install">Install</a> |
+  <a href="#why-microclaw">Why MicroClaw</a> |
+  <a href="#how-it-works">Architecture</a> |
+  <a href="#documentation">Docs</a>
+</p>
+
+<p align="center">
+  <strong>Quick Routes:</strong>
+  <a href="docs/generated/tools.md">Tools</a> ·
+  <a href="docs/generated/config-defaults.md">Config Defaults</a> ·
+  <a href="docs/generated/provider-matrix.md">Provider Matrix</a> ·
+  <a href="docs/operations/runbook.md">Runbook</a> ·
+  <a href="docs/operations/http-hook-trigger.md">Web Hooks</a> ·
+  <a href="docs/clawhub/overview.md">ClawHub</a>
+</p>
+
 
 > **Note:** This project is under active development. Features may change, and contributions are welcome!
 
 
-An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github.com/gavrielc/nanoclaw/) and incorporating some of its design ideas. MicroClaw uses a channel-agnostic core with platform adapters: it currently supports Telegram, Discord, Slack, Feishu/Lark, Matrix, WhatsApp, iMessage, Email, Nostr, Signal, DingTalk, QQ, IRC, and Web, and is designed to add more platforms over time. It works with multiple LLM providers (Anthropic + OpenAI-compatible APIs) and supports full tool execution: run shell commands, read/write/edit files, search codebases, browse the web, schedule tasks, and maintain persistent memory across conversations.
+MicroClaw is an agent runtime for chat surfaces. It gives you one channel-agnostic agent loop, one provider-agnostic LLM layer, and one persistent runtime that can move across Telegram, Discord, Slack, Feishu/Lark, IRC, Web, and additional adapters over time.
 
+It works with Anthropic and OpenAI-compatible providers, supports multi-step tool execution, keeps session state across turns, stores durable memory, runs scheduled tasks, and can expose the same runtime through both chat channels and a local web UI.
 
 <p align="center">
   <img src="screenshots/screenshot1.png" width="45%" />
@@ -25,30 +50,47 @@ An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github
   <img src="screenshots/screenshot2.png" width="45%" />
 </p>
 
-## Table of contents
+## Why MicroClaw
 
-- [How it works](#how-it-works)
-- [Install](#install)
-- [Features](#features)
-- [Tools](#tools)
-- [Memory](#memory)
-- [Skills](#skills)
-- [Plugins](#plugins)
-- [MCP](#mcp)
-- [Plan & Execute](#plan--execute)
-- [Scheduling](#scheduling)
-- [Local Web UI (cross-channel history)](#local-web-ui-cross-channel-history)
-- [Release](#release)
-- [Setup](#setup)
-- [Configuration](#configuration)
-- [Docker Sandbox](#docker-sandbox)
-- [Platform behavior](#platform-behavior)
-- [Multi-chat permission model](#multi-chat-permission-model)
-- [Usage examples](#usage-examples)
-- [Architecture](#architecture)
-- [Adding a New Platform Adapter](#adding-a-new-platform-adapter)
-- [Observability (Langfuse)](#observability-langfuse)
-- [Documentation](#documentation)
+- **One runtime, many channels**: keep the same agent loop, tools, memory, and policies across chat platforms.
+- **Built for agentic execution**: tool calls, tool-result reflection, sub-agents, planning, and mid-run updates are first-class.
+- **Persistent by default**: sessions resume, memory survives restarts, and scheduled tasks keep running in the background.
+- **Provider-agnostic**: use Anthropic or OpenAI-compatible APIs without rewriting the runtime.
+- **Extensible where it matters**: add skills, MCP servers, plugins, hooks, and new channel adapters without replacing the core.
+
+## Quick Start
+
+Install:
+
+```sh
+curl -fsSL https://microclaw.ai/install.sh | bash
+```
+
+Run diagnostics:
+
+```sh
+microclaw doctor
+```
+
+Create config with the interactive wizard:
+
+```sh
+microclaw setup
+```
+
+Start the runtime:
+
+```sh
+microclaw start
+```
+
+Default local web UI:
+
+```text
+http://127.0.0.1:10961
+```
+
+If you want a source build instead, jump to [Install](#install). If you want operational details, start with [Setup](#setup) and [Documentation](#documentation).
 
 ## Install
 
@@ -146,7 +188,14 @@ In `setup`, set:
 
 ## How it works
 
-Every message triggers an **agentic loop**: the model can call tools, inspect the results, call more tools, and reason through multi-step tasks before responding. Up to 100 iterations per request by default.
+Every message goes through a shared **agent loop**:
+
+1. Load file memory, structured memory, skills, and resumable session state
+2. Call the configured model with tool schemas and runtime context
+3. Execute tool calls, append results, and continue the loop until completion
+4. Persist the updated session, memory signals, and observability data
+
+This keeps behavior consistent across channels and lets one runtime power interactive chat, scheduled work, web-triggered automation, and sub-agent execution.
 
 <p align="center">
   <img src="docs/assets/readme/microclaw-architecture.svg" alt="MicroClaw architecture overview" width="96%" />
