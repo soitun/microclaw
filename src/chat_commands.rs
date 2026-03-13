@@ -999,6 +999,7 @@ mod tests {
         assert!(!model_guard.contains_key("telegram"));
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn provider_command_persists_override_for_default_account_channel() {
         let _guard = env_lock();
@@ -1069,6 +1070,7 @@ channels:
         let _ = fs::remove_dir_all(&temp);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn model_command_persists_override_for_default_account_channel() {
         let _guard = env_lock();
