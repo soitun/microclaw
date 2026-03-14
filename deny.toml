@@ -7,7 +7,9 @@ version = 2
 yanked = "deny"
 
 [bans]
-multiple-versions = "warn"
+# The current graph includes several unavoidable duplicate transitive versions
+# across Matrix, Telegram, and OTLP stacks; keep bans focused on actual risks.
+multiple-versions = "allow"
 wildcards = "deny"
 deny = []
 skip = []
@@ -20,10 +22,11 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0",
   "ISC",
   "MPL-2.0",
   "Unicode-3.0",
-  "Unicode-DFS-2016",
   "Zlib",
 ]
 confidence-threshold = 0.8

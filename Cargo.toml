@@ -24,13 +24,13 @@ sqlite-vec = ["microclaw-storage/sqlite-vec"]
 journald = ["microclaw-app/journald"]
 
 [dependencies]
-microclaw-core = { path = "crates/microclaw-core" }
-microclaw-clawhub = { path = "crates/microclaw-clawhub" }
-microclaw-storage = { path = "crates/microclaw-storage" }
-microclaw-tools = { path = "crates/microclaw-tools" }
-microclaw-channels = { path = "crates/microclaw-channels" }
-microclaw-app = { path = "crates/microclaw-app" }
-microclaw-observability = { path = "crates/microclaw-observability" }
+microclaw-core = { version = "0.1.0", path = "crates/microclaw-core" }
+microclaw-clawhub = { version = "0.1.0", path = "crates/microclaw-clawhub" }
+microclaw-storage = { version = "0.1.0", path = "crates/microclaw-storage" }
+microclaw-tools = { version = "0.1.0", path = "crates/microclaw-tools" }
+microclaw-channels = { version = "0.1.0", path = "crates/microclaw-channels" }
+microclaw-app = { version = "0.1.0", path = "crates/microclaw-app" }
+microclaw-observability = { version = "0.1.0", path = "crates/microclaw-observability" }
 teloxide = { version = "0.17", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-native-tls = "0.3"
@@ -58,8 +58,8 @@ iana-time-zone = "0.1"
 zip = "2"
 sha2 = "0.10"
 axum = { version = "0.7", features = ["ws"] }
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-crossterm = "0.28"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
 include_dir = "0.7"
 async-stream = "0.3"
