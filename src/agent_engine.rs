@@ -3204,7 +3204,8 @@ mod tests {
         assert!(
             reply.contains("bash `git clone https://github.com/naamfung/zua.git /tmp/zua` failed:")
         );
-        assert!(reply.contains("Command contains absolute /tmp path"));
+        assert!(reply.contains("Command contains an absolute /tmp path"));
+        assert!(reply.contains("current chat working directory"));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         drop(state);
@@ -3318,7 +3319,8 @@ mod tests {
     fn test_build_system_prompt_prefers_chat_working_dir_over_tmp() {
         let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None);
         assert!(prompt.contains("current chat working directory"));
-        assert!(prompt.contains("avoid `/tmp` unless the user explicitly asks for it"));
+        assert!(prompt.contains("use the current chat working directory's `tmp/` subdirectory"));
+        assert!(prompt.contains("Do not use absolute `/tmp/...` paths"));
     }
 
     #[test]
