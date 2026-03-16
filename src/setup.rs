@@ -3243,6 +3243,43 @@ impl SetupApp {
         }
     }
 
+    fn handle_provider_preset_enter(&mut self) {
+        let selected_field = self
+            .provider_preset_page
+            .as_ref()
+            .map(|page| page.field_selected)
+            .unwrap_or(0);
+        let editing = self
+            .provider_preset_page
+            .as_ref()
+            .map(|page| page.editing)
+            .unwrap_or(false);
+        if editing {
+            if let Some(page) = self.provider_preset_page.as_mut() {
+                page.editing = false;
+            }
+            let _ = self.sync_provider_preset_page_field();
+            self.status = "Updated provider profile field".into();
+            return;
+        }
+
+        match selected_field {
+            1 => self.open_provider_preset_provider_picker(),
+            3 => self.open_provider_preset_model_picker(),
+            5 => {
+                self.toggle_selected_provider_preset_show_thinking();
+                let _ = self.sync_provider_preset_page_field();
+                self.status = "Toggled provider profile show_thinking".into();
+            }
+            _ => {
+                if let Some(page) = self.provider_preset_page.as_mut() {
+                    page.editing = true;
+                    self.status = "Editing provider profile field".into();
+                }
+            }
+        }
+    }
+
     fn llm_provider_preset_choices(&self, current: &str) -> Vec<(String, String)> {
         let mut options = vec![("main (global default)".to_string(), String::new())];
         let mut presets: Vec<(String, LlmProviderProfile)> =
@@ -7647,34 +7684,7 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                             }
                         }
                         KeyCode::Enter => {
-                            let selected_field = app
-                                .provider_preset_page
-                                .as_ref()
-                                .map(|page| page.field_selected)
-                                .unwrap_or(0);
-                            let editing = app
-                                .provider_preset_page
-                                .as_ref()
-                                .map(|page| page.editing)
-                                .unwrap_or(false);
-                            if editing {
-                                if let Some(page) = app.provider_preset_page.as_mut() {
-                                    page.editing = false;
-                                }
-                                let _ = app.sync_provider_preset_page_field();
-                                app.status = "Updated provider profile field".into();
-                            } else if selected_field == 1 {
-                                app.open_provider_preset_provider_picker();
-                            } else if selected_field == 4 {
-                                app.open_provider_preset_model_picker();
-                            } else if selected_field == 5 {
-                                app.toggle_selected_provider_preset_show_thinking();
-                                let _ = app.sync_provider_preset_page_field();
-                                app.status = "Toggled provider profile show_thinking".into();
-                            } else if let Some(page) = app.provider_preset_page.as_mut() {
-                                page.editing = true;
-                                app.status = "Editing provider profile field".into();
-                            }
+                            app.handle_provider_preset_enter();
                         }
                         KeyCode::Backspace => {
                             let editing = app
@@ -8760,6 +8770,63 @@ subagents:
         assert_eq!(page.entries[0].provider, "openai");
         assert_eq!(page.entries[0].base_url, "https://api.openai.com/v1");
         assert_eq!(page.entries[0].default_model, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_provider_preset_enter_on_default_model_opens_model_picker() {
+        let mut app = SetupApp::new();
+        app.provider_preset_page = Some(ProviderPresetPage {
+            entries: vec![ProviderPresetDraft {
+                id: "provider1".into(),
+                provider: "openai".into(),
+                api_key: String::new(),
+                base_url: "https://api.openai.com/v1".into(),
+                user_agent: String::new(),
+                default_model: "gpt-5.2".into(),
+                show_thinking: false,
+            }],
+            selected: 0,
+            mode: ProviderPresetPageMode::Edit,
+            field_selected: 3,
+            editing: false,
+            picker: None,
+        });
+
+        app.handle_provider_preset_enter();
+
+        let page = app.provider_preset_page.as_ref().unwrap();
+        let picker = page.picker.as_ref().unwrap();
+        assert_eq!(picker.target_key, "default_model");
+        assert!(picker.title.contains("openai"));
+        assert!(!page.editing);
+    }
+
+    #[test]
+    fn test_provider_preset_enter_on_base_url_starts_text_editing() {
+        let mut app = SetupApp::new();
+        app.provider_preset_page = Some(ProviderPresetPage {
+            entries: vec![ProviderPresetDraft {
+                id: "provider1".into(),
+                provider: "openai".into(),
+                api_key: String::new(),
+                base_url: "https://api.openai.com/v1".into(),
+                user_agent: String::new(),
+                default_model: "gpt-5.2".into(),
+                show_thinking: false,
+            }],
+            selected: 0,
+            mode: ProviderPresetPageMode::Edit,
+            field_selected: 4,
+            editing: false,
+            picker: None,
+        });
+
+        app.handle_provider_preset_enter();
+
+        let page = app.provider_preset_page.as_ref().unwrap();
+        assert!(page.editing);
+        assert!(page.picker.is_none());
+        assert_eq!(app.status, "Editing provider profile field");
     }
 
     #[test]
