@@ -4430,6 +4430,7 @@ impl SetupApp {
         std::thread::spawn(move || {
             perform_online_validation(
                 tg_enabled,
+                true,
                 &tg_token,
                 &env_username,
                 &provider,
@@ -4502,6 +4503,7 @@ impl SetupApp {
         let profile_id = request.profile_id.clone();
         let checks = std::thread::spawn(move || {
             perform_online_validation(
+                false,
                 false,
                 "",
                 "",
@@ -5456,6 +5458,7 @@ impl SetupApp {
 #[allow(clippy::too_many_arguments)]
 fn perform_online_validation(
     telegram_enabled: bool,
+    include_telegram_status: bool,
     tg_token: &str,
     env_username: &str,
     provider: &str,
@@ -5501,7 +5504,7 @@ fn perform_online_validation(
             checks.push(format!("Telegram OK ({actual_username})"));
         }
     } else {
-        checks.push("Telegram skipped (disabled)".into());
+        push_telegram_disabled_status(&mut checks, include_telegram_status);
     }
 
     // --- LLM validation: send a minimal "hi" message ---
@@ -5616,6 +5619,12 @@ fn perform_online_validation(
     }
 
     Ok(checks)
+}
+
+fn push_telegram_disabled_status(checks: &mut Vec<String>, include_telegram_status: bool) {
+    if include_telegram_status {
+        checks.push("Telegram skipped (disabled)".into());
+    }
 }
 
 fn send_openai_validation_chat_request(
@@ -7624,17 +7633,17 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                             match run_with_spinner(
                                 &mut terminal,
                                 &mut app,
-                                &format!("Testing provider profile {profile_id}"),
+                                &format!("Testing model for provider profile {profile_id}"),
                                 move || app_for_online.validate_selected_provider_preset_online(),
                             ) {
                                 Ok((validated_profile_id, checks)) => {
                                     app.status = format!(
-                                        "Profile {validated_profile_id} passed: {}",
+                                        "Model test for {validated_profile_id} passed: {}",
                                         checks.join(" | ")
                                     );
                                 }
                                 Err(e) => {
-                                    app.status = format!("Profile {profile_id} test failed: {e}");
+                                    app.status = format!("Model test for {profile_id} failed: {e}");
                                 }
                             }
                         }
@@ -9022,6 +9031,20 @@ subagents:
     #[test]
     fn test_provider_preset_field_label_uses_default_model() {
         assert_eq!(SetupApp::provider_preset_field_labels()[3], "Default model");
+    }
+
+    #[test]
+    fn test_push_telegram_disabled_status_included_when_requested() {
+        let mut checks = Vec::new();
+        push_telegram_disabled_status(&mut checks, true);
+        assert_eq!(checks, vec!["Telegram skipped (disabled)".to_string()]);
+    }
+
+    #[test]
+    fn test_push_telegram_disabled_status_omitted_when_not_requested() {
+        let mut checks = Vec::new();
+        push_telegram_disabled_status(&mut checks, false);
+        assert!(checks.is_empty());
     }
 
     #[test]
