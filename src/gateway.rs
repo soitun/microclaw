@@ -291,7 +291,8 @@ fn build_context() -> Result<ServiceContext> {
     let current_dir = std::env::current_dir().context("Failed to resolve current directory")?;
     let mut working_dir = current_dir.clone();
     let mut config_path = resolve_config_path(&current_dir);
-    if config_path.is_none() && cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    if config_path.is_none() {
         if let Some(launch) = resolve_windows_installed_service_launch_info() {
             if let Some(installed_working_dir) = launch.working_dir {
                 working_dir = installed_working_dir;
@@ -902,6 +903,7 @@ fn status_linux(ctx: &ServiceContext, opts: &StatusOptions) -> Result<()> {
     }
 }
 
+#[cfg(windows)]
 fn legacy_windows_service_root() -> PathBuf {
     std::env::var("ProgramData")
         .or_else(|_| std::env::var("PROGRAMDATA"))
@@ -911,14 +913,17 @@ fn legacy_windows_service_root() -> PathBuf {
         .join("gateway")
 }
 
+#[cfg(windows)]
 fn legacy_windows_wrapper_exe_path() -> PathBuf {
     legacy_windows_service_root().join(format!("{WINDOWS_SERVICE_NAME}.exe"))
 }
 
+#[cfg(windows)]
 fn legacy_windows_wrapper_xml_path() -> PathBuf {
     legacy_windows_service_root().join(format!("{WINDOWS_SERVICE_NAME}.xml"))
 }
 
+#[cfg(windows)]
 fn cleanup_legacy_windows_wrapper_artifacts() -> Result<()> {
     for path in [
         legacy_windows_wrapper_exe_path(),
@@ -968,7 +973,7 @@ fn parse_windows_command_line(command_line: &str) -> Vec<String> {
             }
             if ch == '"' {
                 arg.push_str(&"\\".repeat(backslashes / 2));
-                if backslashes % 2 == 0 {
+                if backslashes.is_multiple_of(2) {
                     if in_quotes && index + 1 < chars.len() && chars[index + 1] == '"' {
                         arg.push('"');
                         index += 1;
