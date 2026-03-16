@@ -146,6 +146,59 @@ struct ChatHistoryPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct AgentsListPayload {
+    agents: Vec<GatewayAgent>,
+}
+
+#[derive(Debug, Serialize)]
+struct GatewayAgent {
+    id: String,
+    name: String,
+    label: String,
+    model: String,
+    channel: &'static str,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelsListPayload {
+    models: Vec<GatewayModel>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayModel {
+    id: String,
+    name: String,
+    provider: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigGetPayload {
+    config: ConfigGetConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigGetConfig {
+    agents: ConfigGetAgents,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigGetAgents {
+    defaults: ConfigGetDefaults,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigGetDefaults {
+    model: ConfigGetModel,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigGetModel {
+    primary: String,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatMessage {
     id: String,
@@ -361,7 +414,16 @@ async fn process_connect_frame(
                 conn_id: conn_id.to_string(),
             },
             features: HelloFeatures {
-                methods: vec!["health", "status", "chat.send", "chat.history"],
+                methods: vec![
+                    "health",
+                    "status",
+                    "chat.send",
+                    "chat.history",
+                    "agents.list",
+                    "models.list",
+                    "config.get",
+                    "node.list",
+                ],
                 events: vec!["connect.challenge", "chat", "tick"],
             },
             snapshot: HelloSnapshot {
@@ -439,6 +501,79 @@ async fn handle_request_frame(
                 id: &id,
                 ok: true,
                 payload: Some(payload),
+                error: None,
+            };
+            let _ = send_json(sender, &res).await;
+        }
+        "agents.list" => {
+            if !identity.allows(AuthScope::Read) {
+                let _ = send_error_response(sender, &id, "FORBIDDEN", "forbidden").await;
+                return Ok(());
+            }
+            let payload = AgentsListPayload {
+                agents: bridge_agents(&state.app_state.config),
+            };
+            let res = ResponseFrame {
+                kind: "res",
+                id: &id,
+                ok: true,
+                payload: Some(payload),
+                error: None,
+            };
+            let _ = send_json(sender, &res).await;
+        }
+        "models.list" => {
+            if !identity.allows(AuthScope::Read) {
+                let _ = send_error_response(sender, &id, "FORBIDDEN", "forbidden").await;
+                return Ok(());
+            }
+            let payload = ModelsListPayload {
+                models: bridge_models(&state.app_state.config),
+            };
+            let res = ResponseFrame {
+                kind: "res",
+                id: &id,
+                ok: true,
+                payload: Some(payload),
+                error: None,
+            };
+            let _ = send_json(sender, &res).await;
+        }
+        "config.get" => {
+            if !identity.allows(AuthScope::Read) {
+                let _ = send_error_response(sender, &id, "FORBIDDEN", "forbidden").await;
+                return Ok(());
+            }
+            let payload = ConfigGetPayload {
+                config: ConfigGetConfig {
+                    agents: ConfigGetAgents {
+                        defaults: ConfigGetDefaults {
+                            model: ConfigGetModel {
+                                primary: bridge_primary_model(&state.app_state.config),
+                            },
+                        },
+                    },
+                },
+            };
+            let res = ResponseFrame {
+                kind: "res",
+                id: &id,
+                ok: true,
+                payload: Some(payload),
+                error: None,
+            };
+            let _ = send_json(sender, &res).await;
+        }
+        "node.list" => {
+            if !identity.allows(AuthScope::Read) {
+                let _ = send_error_response(sender, &id, "FORBIDDEN", "forbidden").await;
+                return Ok(());
+            }
+            let res = ResponseFrame {
+                kind: "res",
+                id: &id,
+                ok: true,
+                payload: Some(Vec::<serde_json::Value>::new()),
                 error: None,
             };
             let _ = send_json(sender, &res).await;
@@ -584,6 +719,54 @@ async fn handle_request_frame(
         }
     }
     Ok(())
+}
+
+fn bridge_agents(config: &crate::config::Config) -> Vec<GatewayAgent> {
+    let label = config.bot_username_for_channel("web");
+    let display = if label.trim().is_empty() {
+        "MicroClaw".to_string()
+    } else {
+        label
+    };
+
+    vec![GatewayAgent {
+        id: "microclaw-main".to_string(),
+        name: "MicroClaw Orchestrator".to_string(),
+        label: display,
+        model: bridge_primary_model(config),
+        channel: "web",
+        status: "online",
+    }]
+}
+
+fn bridge_primary_model(config: &crate::config::Config) -> String {
+    let model = config.model.trim();
+    if !model.is_empty() {
+        model.to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn bridge_models(config: &crate::config::Config) -> Vec<GatewayModel> {
+    let mut out = Vec::new();
+    for profile in config.list_llm_provider_profiles() {
+        let provider = profile.provider.clone();
+        for model in profile.models {
+            out.push(GatewayModel {
+                id: if model.contains('/') {
+                    model.clone()
+                } else {
+                    format!("{provider}/{model}")
+                },
+                name: model,
+                provider: provider.clone(),
+            });
+        }
+    }
+    out.sort_by(|left, right| left.id.cmp(&right.id));
+    out.dedup_by(|left, right| left.id == right.id);
+    out
 }
 
 fn spawn_chat_event_forwarder(

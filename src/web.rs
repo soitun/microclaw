@@ -4346,6 +4346,71 @@ commands:
     }
 
     #[tokio::test]
+    async fn test_ws_bridge_supports_agent_and_model_metadata_methods() {
+        let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
+        seed_test_api_key(&web_state, "ws-meta-secret").await;
+        let (addr, server) = spawn_test_server(build_router(web_state)).await;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        let _ = recv_ws_json(&mut ws).await;
+
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({
+                "type": "req",
+                "id": "connect-1",
+                "method": "connect",
+                "params": {
+                    "minProtocol": 3,
+                    "maxProtocol": 3,
+                    "auth": { "token": "ws-meta-secret" }
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let _ = recv_ws_json(&mut ws).await;
+
+        for (request_id, method) in [
+            ("agents-1", "agents.list"),
+            ("models-1", "models.list"),
+            ("config-1", "config.get"),
+            ("nodes-1", "node.list"),
+        ] {
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                json!({
+                    "type": "req",
+                    "id": request_id,
+                    "method": method,
+                    "params": {}
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let res = loop {
+                let candidate = recv_ws_json(&mut ws).await;
+                if candidate.get("type").and_then(|v| v.as_str()) != Some("res") {
+                    continue;
+                }
+                if candidate.get("id").and_then(|v| v.as_str()) != Some(request_id) {
+                    continue;
+                }
+                break candidate;
+            };
+            assert_eq!(
+                res.get("ok").and_then(|v| v.as_bool()),
+                Some(true),
+                "method={method}"
+            );
+        }
+
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn test_ws_connect_invalid_token_returns_unauthorized() {
         let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
         call_blocking(web_state.app_state.db.clone(), |db| {
