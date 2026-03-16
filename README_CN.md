@@ -155,6 +155,32 @@ brew tap microclaw/tap
 brew install microclaw
 ```
 
+### Docker 镜像
+
+Release tag 会发布官方容器镜像到：
+
+- `ghcr.io/microclaw/microclaw:latest`
+- `ghcr.io/microclaw/microclaw:<版本号>`
+- `docker.io/microclaw/microclaw:latest`，前提是仓库已配置 Docker Hub 发布凭据
+
+使用本地配置和数据目录挂载运行官方镜像：
+
+```sh
+docker run --rm -it \
+  -p 127.0.0.1:10961:10961 \
+  -v "$(pwd)/microclaw.config.yaml:/app/microclaw.config.yaml:ro" \
+  -v "$(pwd)/data:/home/microclaw/.microclaw" \
+  -v "$(pwd)/tmp:/app/tmp" \
+  ghcr.io/microclaw/microclaw:latest
+```
+
+镜像入口是 `microclaw`，因此可以直接覆盖子命令：
+
+```sh
+docker run --rm ghcr.io/microclaw/microclaw:latest doctor
+docker run --rm ghcr.io/microclaw/microclaw:latest version
+```
+
 ### 从源码构建
 
 ```sh

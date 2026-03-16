@@ -155,6 +155,32 @@ brew tap microclaw/tap
 brew install microclaw
 ```
 
+### Docker image
+
+Release tags publish an official container image to:
+
+- `ghcr.io/microclaw/microclaw:latest`
+- `ghcr.io/microclaw/microclaw:<version>`
+- `docker.io/microclaw/microclaw:latest` when Docker Hub publishing credentials are configured for the repository
+
+Run the official image with your local config and data mounts:
+
+```sh
+docker run --rm -it \
+  -p 127.0.0.1:10961:10961 \
+  -v "$(pwd)/microclaw.config.yaml:/app/microclaw.config.yaml:ro" \
+  -v "$(pwd)/data:/home/microclaw/.microclaw" \
+  -v "$(pwd)/tmp:/app/tmp" \
+  ghcr.io/microclaw/microclaw:latest
+```
+
+The image entrypoint is `microclaw`, so you can override the command directly:
+
+```sh
+docker run --rm ghcr.io/microclaw/microclaw:latest doctor
+docker run --rm ghcr.io/microclaw/microclaw:latest version
+```
+
 ### From source
 
 ```sh
