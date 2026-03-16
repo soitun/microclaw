@@ -1137,7 +1137,6 @@ async fn process_with_agent_logic(
             } else {
                 display_text
             };
-            let final_text = final_text;
             if let Some(tx) = event_tx {
                 let _ = tx.send(AgentEvent::FinalResponse {
                     text: final_text.clone(),
