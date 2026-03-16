@@ -947,6 +947,10 @@ fn default_model_for_provider(provider: &str) -> &'static str {
         .unwrap_or("gpt-5.2")
 }
 
+fn is_placeholder_provider_model_list(models: &[&str]) -> bool {
+    models.len() == 1 && models[0].eq_ignore_ascii_case("custom-model")
+}
+
 fn normalize_setup_provider_id(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -3167,11 +3171,15 @@ impl SetupApp {
             self.status = "Unknown provider; switched to manual model input".to_string();
             return;
         };
-        let mut options = preset
-            .models
-            .iter()
-            .map(|model| ((*model).to_string(), (*model).to_string()))
-            .collect::<Vec<_>>();
+        let mut options = if is_placeholder_provider_model_list(preset.models) {
+            Vec::new()
+        } else {
+            preset
+                .models
+                .iter()
+                .map(|model| ((*model).to_string(), (*model).to_string()))
+                .collect::<Vec<_>>()
+        };
         options.push((
             MODEL_PICKER_MANUAL_INPUT.to_string(),
             MODEL_PICKER_MANUAL_INPUT.to_string(),
@@ -8827,6 +8835,36 @@ subagents:
         assert!(page.editing);
         assert!(page.picker.is_none());
         assert_eq!(app.status, "Editing provider profile field");
+    }
+
+    #[test]
+    fn test_custom_provider_model_picker_hides_placeholder_model() {
+        let mut app = SetupApp::new();
+        app.provider_preset_page = Some(ProviderPresetPage {
+            entries: vec![ProviderPresetDraft {
+                id: "provider1".into(),
+                provider: "custom".into(),
+                api_key: String::new(),
+                base_url: "https://example.com/v1".into(),
+                user_agent: String::new(),
+                default_model: "custom-model".into(),
+                show_thinking: false,
+            }],
+            selected: 0,
+            mode: ProviderPresetPageMode::Edit,
+            field_selected: 3,
+            editing: false,
+            picker: None,
+        });
+
+        app.open_provider_preset_model_picker();
+
+        let page = app.provider_preset_page.as_ref().unwrap();
+        let picker = page.picker.as_ref().unwrap();
+        assert_eq!(picker.target_key, "default_model");
+        assert_eq!(picker.options.len(), 1);
+        assert_eq!(picker.options[0].0, MODEL_PICKER_MANUAL_INPUT);
+        assert_eq!(picker.options[0].1, MODEL_PICKER_MANUAL_INPUT);
     }
 
     #[test]
