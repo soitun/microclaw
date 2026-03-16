@@ -10,14 +10,23 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const LINUX_SERVICE_NAME: &str = "microclaw-gateway.service";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MAC_LABEL: &str = "ai.microclaw.gateway";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const WINDOWS_SERVICE_NAME: &str = "MicroClawGateway";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const WINDOWS_SERVICE_DISPLAY_NAME: &str = "MicroClaw Gateway";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const WINDOWS_SERVICE_DESCRIPTION: &str = "MicroClaw Gateway Service";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const WINDOWS_SERVICE_STATE_STOPPED: i64 = 1;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const WINDOWS_SERVICE_STATE_RUNNING: i64 = 4;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const LOG_STDOUT_FILE: &str = "microclaw-gateway.log";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const LOG_STDERR_FILE: &str = "microclaw-gateway.error.log";
 const DEFAULT_LOG_LINES: usize = 200;
 
@@ -27,6 +36,7 @@ struct ServiceContext {
     working_dir: PathBuf,
     config_path: Option<PathBuf>,
     runtime_logs_dir: PathBuf,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     service_env: BTreeMap<String, String>,
 }
 
@@ -41,6 +51,7 @@ struct StatusOptions {
     deep: bool,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Default)]
 struct MacRuntimeStatus {
     state: Option<String>,
@@ -49,6 +60,7 @@ struct MacRuntimeStatus {
     last_exit_reason: Option<String>,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Default)]
 struct LinuxRuntimeStatus {
     load_state: Option<String>,
@@ -57,9 +69,11 @@ struct LinuxRuntimeStatus {
     main_pid: Option<i64>,
     exec_main_status: Option<i64>,
     exec_main_code: Option<String>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fragment_path: Option<String>,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Default)]
 struct WindowsRuntimeStatus {
     installed: bool,
@@ -73,6 +87,7 @@ struct WindowsRuntimeStatus {
     display_name: Option<String>,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct WindowsServiceLaunchInfo {
     executable_path: Option<PathBuf>,
@@ -179,14 +194,23 @@ enum GatewayAction {
 }
 
 fn install(opts: InstallOptions) -> Result<()> {
-    let ctx = build_context()?;
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
+        let ctx = build_context()?;
         install_macos(&ctx, &opts)
-    } else if cfg!(target_os = "linux") {
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let ctx = build_context()?;
         install_linux(&ctx, &opts)
-    } else if cfg!(target_os = "windows") {
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let ctx = build_context()?;
         install_windows(&ctx, &opts)
-    } else {
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         Err(anyhow!(
             "Gateway service is only supported on macOS, Linux, and Windows"
         ))
@@ -194,13 +218,20 @@ fn install(opts: InstallOptions) -> Result<()> {
 }
 
 fn uninstall() -> Result<()> {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         uninstall_macos()
-    } else if cfg!(target_os = "linux") {
+    }
+    #[cfg(target_os = "linux")]
+    {
         uninstall_linux()
-    } else if cfg!(target_os = "windows") {
+    }
+    #[cfg(target_os = "windows")]
+    {
         uninstall_windows()
-    } else {
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         Err(anyhow!(
             "Gateway service is only supported on macOS, Linux, and Windows"
         ))
@@ -208,13 +239,20 @@ fn uninstall() -> Result<()> {
 }
 
 fn start() -> Result<()> {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         start_macos()
-    } else if cfg!(target_os = "linux") {
+    }
+    #[cfg(target_os = "linux")]
+    {
         start_linux()
-    } else if cfg!(target_os = "windows") {
+    }
+    #[cfg(target_os = "windows")]
+    {
         start_windows()
-    } else {
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         Err(anyhow!(
             "Gateway service is only supported on macOS, Linux, and Windows"
         ))
@@ -222,13 +260,20 @@ fn start() -> Result<()> {
 }
 
 fn stop() -> Result<()> {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         stop_macos()
-    } else if cfg!(target_os = "linux") {
+    }
+    #[cfg(target_os = "linux")]
+    {
         stop_linux()
-    } else if cfg!(target_os = "windows") {
+    }
+    #[cfg(target_os = "windows")]
+    {
         stop_windows()
-    } else {
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         Err(anyhow!(
             "Gateway service is only supported on macOS, Linux, and Windows"
         ))
@@ -236,13 +281,20 @@ fn stop() -> Result<()> {
 }
 
 fn restart() -> Result<()> {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         restart_macos()
-    } else if cfg!(target_os = "linux") {
+    }
+    #[cfg(target_os = "linux")]
+    {
         restart_linux()
-    } else if cfg!(target_os = "windows") {
+    }
+    #[cfg(target_os = "windows")]
+    {
         restart_windows()
-    } else {
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         Err(anyhow!(
             "Gateway service is only supported on macOS, Linux, and Windows"
         ))
@@ -250,15 +302,23 @@ fn restart() -> Result<()> {
 }
 
 fn status(opts: StatusOptions) -> Result<()> {
-    let ctx = build_context()?;
-
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
+        let ctx = build_context()?;
         status_macos(&ctx, &opts)
-    } else if cfg!(target_os = "linux") {
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let ctx = build_context()?;
         status_linux(&ctx, &opts)
-    } else if cfg!(target_os = "windows") {
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let ctx = build_context()?;
         status_windows(&ctx, &opts)
-    } else {
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         Err(anyhow!(
             "Gateway service is only supported on macOS, Linux, and Windows"
         ))
@@ -361,6 +421,7 @@ fn resolve_runtime_logs_dir(cwd: &Path, config_path: Option<&Path>) -> PathBuf {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn build_service_env(config_path: Option<&PathBuf>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("MICROCLAW_GATEWAY".to_string(), "1".to_string());
@@ -471,6 +532,7 @@ fn run_command(cmd: &str, args: &[&str]) -> Result<std::process::Output> {
     Ok(output)
 }
 
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 fn ensure_success(output: std::process::Output, cmd: &str, args: &[&str]) -> Result<()> {
     if output.status.success() {
         return Ok(());
@@ -496,6 +558,7 @@ fn assert_command_exists(cmd: &str) -> Result<()> {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn assert_systemd_user_available() -> Result<()> {
     assert_command_exists("systemctl")?;
     let output = run_command("systemctl", &["--user", "status"])?;
@@ -520,6 +583,7 @@ fn assert_systemd_user_available() -> Result<()> {
     Err(anyhow!("systemctl --user unavailable: {}", detail))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_unit_path() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home)
@@ -529,6 +593,7 @@ fn linux_unit_path() -> Result<PathBuf> {
         .join(LINUX_SERVICE_NAME))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn assert_no_line_breaks(value: &str, label: &str) -> Result<()> {
     if value.contains('\n') || value.contains('\r') {
         return Err(anyhow!("{} cannot contain CR or LF", label));
@@ -536,6 +601,7 @@ fn assert_no_line_breaks(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn systemd_escape_arg(value: &str) -> Result<String> {
     assert_no_line_breaks(value, "Systemd unit value")?;
     if !value
@@ -549,6 +615,7 @@ fn systemd_escape_arg(value: &str) -> Result<String> {
     Ok(format!("\"{}\"", escaped))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn render_linux_unit(ctx: &ServiceContext) -> Result<String> {
     let mut unit = String::new();
     unit.push_str("[Unit]\n");
@@ -588,6 +655,7 @@ fn render_linux_unit(ctx: &ServiceContext) -> Result<String> {
     Ok(unit)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn install_linux(ctx: &ServiceContext, opts: &InstallOptions) -> Result<()> {
     assert_systemd_user_available()?;
 
@@ -632,6 +700,7 @@ fn install_linux(ctx: &ServiceContext, opts: &InstallOptions) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn uninstall_linux() -> Result<()> {
     assert_systemd_user_available()?;
 
@@ -651,6 +720,7 @@ fn uninstall_linux() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn start_linux() -> Result<()> {
     assert_systemd_user_available()?;
     ensure_success(
@@ -662,6 +732,7 @@ fn start_linux() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn stop_linux() -> Result<()> {
     assert_systemd_user_available()?;
     ensure_success(
@@ -673,6 +744,7 @@ fn stop_linux() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn restart_linux() -> Result<()> {
     assert_systemd_user_available()?;
     ensure_success(
@@ -684,6 +756,7 @@ fn restart_linux() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_key_values(output: &str) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     for line in output.lines() {
@@ -694,6 +767,7 @@ fn parse_key_values(output: &str) -> BTreeMap<String, String> {
     values
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_colon_key_values(output: &str) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     for line in output.lines() {
@@ -704,6 +778,7 @@ fn parse_colon_key_values(output: &str) -> BTreeMap<String, String> {
     values
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_numbered_state(value: Option<&String>) -> (Option<i64>, Option<String>) {
     let Some(value) = value else {
         return (None, None);
@@ -716,6 +791,7 @@ fn parse_numbered_state(value: Option<&String>) -> (Option<i64>, Option<String>)
     (code, state)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_linux_runtime_status(output: &str) -> LinuxRuntimeStatus {
     let map = parse_key_values(output);
     LinuxRuntimeStatus {
@@ -731,6 +807,7 @@ fn parse_linux_runtime_status(output: &str) -> LinuxRuntimeStatus {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn audit_linux_unit(ctx: &ServiceContext, runtime: &LinuxRuntimeStatus) -> Vec<String> {
     let unit_path = runtime
         .fragment_path
@@ -786,6 +863,7 @@ fn audit_linux_unit(ctx: &ServiceContext, runtime: &LinuxRuntimeStatus) -> Vec<S
     issues
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn print_linux_status_text(
     runtime: &LinuxRuntimeStatus,
     issues: &[String],
@@ -843,6 +921,7 @@ fn print_linux_status_text(
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn status_linux(ctx: &ServiceContext, opts: &StatusOptions) -> Result<()> {
     assert_systemd_user_available()?;
 
@@ -953,6 +1032,7 @@ fn resolve_windows_installed_service_launch_info() -> Option<WindowsServiceLaunc
     Some(parse_windows_service_launch_info(&binary_path))
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_windows_command_line(command_line: &str) -> Vec<String> {
     let chars: Vec<char> = command_line.chars().collect();
     let mut args = Vec::new();
@@ -1017,6 +1097,7 @@ fn parse_windows_command_line(command_line: &str) -> Vec<String> {
     args
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn extract_windows_flag_path(args: &[String], flag: &str) -> Option<PathBuf> {
     let mut index = 0usize;
     while index < args.len() {
@@ -1035,6 +1116,7 @@ fn extract_windows_flag_path(args: &[String], flag: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_windows_service_launch_info(command_line: &str) -> WindowsServiceLaunchInfo {
     let args = parse_windows_command_line(command_line);
     let executable_path = args.first().map(PathBuf::from);
@@ -1050,6 +1132,7 @@ fn parse_windows_service_launch_info(command_line: &str) -> WindowsServiceLaunch
     }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_service_missing(output: &std::process::Output) -> bool {
     if output.status.code() == Some(1060) {
         return true;
@@ -1065,6 +1148,7 @@ fn windows_service_missing(output: &std::process::Output) -> bool {
     detail.contains("1060") || detail.contains("does not exist as an installed service")
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_service_text(output: &std::process::Output) -> String {
     format!(
         "{}{}",
@@ -1073,6 +1157,7 @@ fn windows_service_text(output: &std::process::Output) -> String {
     )
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_windows_runtime_status(query_output: &str, qc_output: &str) -> WindowsRuntimeStatus {
     let query = parse_colon_key_values(query_output);
     let qc = parse_colon_key_values(qc_output);
@@ -1091,6 +1176,7 @@ fn parse_windows_runtime_status(query_output: &str, qc_output: &str) -> WindowsR
     }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn wait_for_windows_service_state(expected_state: i64, timeout_secs: u64) -> Result<()> {
     let started = Instant::now();
     loop {
@@ -1113,6 +1199,7 @@ fn wait_for_windows_service_state(expected_state: i64, timeout_secs: u64) -> Res
     }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn wait_for_windows_service_removed(timeout_secs: u64) -> Result<()> {
     let started = Instant::now();
     loop {
@@ -1134,14 +1221,17 @@ fn run_windows_service_host() -> Result<()> {
     windows_native_service::run_service_dispatcher()
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn install_windows(ctx: &ServiceContext, opts: &InstallOptions) -> Result<()> {
     windows_native_service::install(ctx, opts)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn uninstall_windows() -> Result<()> {
     windows_native_service::uninstall()
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn start_windows() -> Result<()> {
     assert_command_exists("sc.exe")?;
     let output = run_command("sc.exe", &["start", WINDOWS_SERVICE_NAME])?;
@@ -1157,6 +1247,7 @@ fn start_windows() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn stop_windows() -> Result<()> {
     assert_command_exists("sc.exe")?;
     let output = run_command("sc.exe", &["stop", WINDOWS_SERVICE_NAME])?;
@@ -1177,6 +1268,7 @@ fn stop_windows() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn restart_windows() -> Result<()> {
     let _ = stop_windows();
     start_windows()?;
@@ -1184,6 +1276,7 @@ fn restart_windows() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn audit_windows_service(
     ctx: &ServiceContext,
     runtime: &WindowsRuntimeStatus,
@@ -1220,6 +1313,7 @@ fn audit_windows_service(
     issues
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn print_windows_status_text(
     runtime: &WindowsRuntimeStatus,
     issues: &[String],
@@ -1272,6 +1366,7 @@ fn print_windows_status_text(
     }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn status_windows(ctx: &ServiceContext, opts: &StatusOptions) -> Result<()> {
     assert_command_exists("sc.exe")?;
 
@@ -1701,6 +1796,7 @@ mod windows_native_service {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mac_plist_path() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home)
@@ -1709,6 +1805,7 @@ fn mac_plist_path() -> Result<PathBuf> {
         .join(format!("{MAC_LABEL}.plist")))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn current_uid() -> Result<String> {
     if let Ok(uid) = std::env::var("UID") {
         if !uid.trim().is_empty() {
@@ -1722,6 +1819,7 @@ fn current_uid() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn render_macos_plist(ctx: &ServiceContext) -> String {
     let mut items = vec![
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>".to_string(),
@@ -1769,6 +1867,7 @@ fn render_macos_plist(ctx: &ServiceContext) -> String {
     items.join("\n")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn xml_escape(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -1778,11 +1877,13 @@ fn xml_escape(input: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mac_target_label() -> Result<String> {
     let uid = current_uid()?;
     Ok(format!("gui/{uid}/{MAC_LABEL}"))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn format_macos_launchagents_permission_hint(path: &Path) -> String {
     format!(
         "Permission denied while writing {}. Check ownership/permissions of ~/Library/LaunchAgents (and existing {}), then retry without sudo.",
@@ -1791,6 +1892,7 @@ fn format_macos_launchagents_permission_hint(path: &Path) -> String {
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn install_macos(ctx: &ServiceContext, opts: &InstallOptions) -> Result<()> {
     assert_command_exists("launchctl")?;
 
@@ -1833,6 +1935,7 @@ fn install_macos(ctx: &ServiceContext, opts: &InstallOptions) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn uninstall_macos() -> Result<()> {
     assert_command_exists("launchctl")?;
 
@@ -1846,6 +1949,7 @@ fn uninstall_macos() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn start_macos() -> Result<()> {
     assert_command_exists("launchctl")?;
 
@@ -1880,6 +1984,7 @@ fn start_macos() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn stop_macos() -> Result<()> {
     assert_command_exists("launchctl")?;
 
@@ -1904,12 +2009,14 @@ fn stop_macos() -> Result<()> {
     ))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn restart_macos() -> Result<()> {
     start_macos()?;
     println!("Gateway service restarted");
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_macos_runtime_status(output: &str) -> MacRuntimeStatus {
     let mut status = MacRuntimeStatus::default();
     for line in output.lines() {
@@ -1929,6 +2036,7 @@ fn parse_macos_runtime_status(output: &str) -> MacRuntimeStatus {
     status
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn audit_macos_plist(ctx: &ServiceContext) -> Vec<String> {
     let plist_path = match mac_plist_path() {
         Ok(path) => path,
@@ -1977,6 +2085,7 @@ fn audit_macos_plist(ctx: &ServiceContext) -> Vec<String> {
     issues
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn plist_key_has_true(content: &str, key: &str) -> bool {
     let pattern = format!("<key>{}</key>", key);
     let Some(pos) = content.find(&pattern) else {
@@ -1985,6 +2094,7 @@ fn plist_key_has_true(content: &str, key: &str) -> bool {
     content[pos..].contains("<true/>")
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn print_macos_status_text(
     runtime: &MacRuntimeStatus,
     issues: &[String],
@@ -2028,6 +2138,7 @@ fn print_macos_status_text(
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn status_macos(ctx: &ServiceContext, opts: &StatusOptions) -> Result<()> {
     assert_command_exists("launchctl")?;
 
