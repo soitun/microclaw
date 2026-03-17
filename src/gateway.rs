@@ -2,6 +2,8 @@ use crate::config::Config;
 use crate::logging;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -9,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio_tungstenite::tungstenite::Message;
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const LINUX_SERVICE_NAME: &str = "microclaw-gateway.service";
@@ -96,6 +99,67 @@ struct WindowsServiceLaunchInfo {
     is_service_run: bool,
 }
 
+#[derive(Debug)]
+struct GatewayCallOptions {
+    method: String,
+    params: String,
+    timeout_ms: u64,
+    json: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct GatewayConnectRequest<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: &'a str,
+    method: &'static str,
+    params: GatewayConnectParams<'a>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayConnectParams<'a> {
+    min_protocol: u64,
+    max_protocol: u64,
+    auth: GatewayConnectAuth<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct GatewayConnectAuth<'a> {
+    token: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct GatewayRpcRequest {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: &'static str,
+    method: String,
+    params: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayRpcError {
+    code: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayRpcFrame {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    ok: Option<bool>,
+    #[serde(default)]
+    payload: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<GatewayRpcError>,
+}
+
 pub fn handle_gateway_cli(args: &[String]) -> Result<()> {
     let cli = match GatewayCli::try_parse_from(
         std::iter::once("gateway").chain(args.iter().map(std::string::String::as_str)),
@@ -125,6 +189,17 @@ pub fn handle_gateway_cli(args: &[String]) -> Result<()> {
         GatewayAction::Restart => restart(),
         GatewayAction::Status { json, deep } => status(StatusOptions { json, deep }),
         GatewayAction::Logs { lines } => logs(lines),
+        GatewayAction::Call {
+            method,
+            params,
+            timeout,
+            json,
+        } => call(GatewayCallOptions {
+            method,
+            params,
+            timeout_ms: timeout,
+            json,
+        }),
         GatewayAction::ServiceRun { .. } => run_windows_service_host(),
     }
 }
@@ -144,6 +219,7 @@ ACTIONS:
     restart                     Restart gateway service
     status [--json] [--deep]    Show gateway service status
     logs [N]                    Show last N lines of gateway logs (default: 200)
+    call <METHOD>               Call gateway RPC over the local/configured WebSocket bridge
 "#
     );
 }
@@ -186,11 +262,216 @@ enum GatewayAction {
     },
     /// Show last N lines of gateway logs (default: 200)
     Logs { lines: Option<usize> },
+    /// Call gateway RPC over the configured bridge
+    Call {
+        /// RPC method name
+        method: String,
+        /// JSON params object
+        #[arg(long, default_value = "{}")]
+        params: String,
+        /// Timeout in milliseconds
+        #[arg(long, default_value_t = 10_000)]
+        timeout: u64,
+        /// Print machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
     #[command(hide = true)]
     ServiceRun {
         #[arg(long, value_name = "PATH")]
         working_dir: Option<PathBuf>,
     },
+}
+
+fn call(opts: GatewayCallOptions) -> Result<()> {
+    let payload = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(call_async(&opts)))?
+    } else {
+        let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(call_async(&opts))?
+    };
+    if opts.json {
+        println!("{}", serde_json::to_string(&payload)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    }
+    Ok(())
+}
+
+async fn call_async(opts: &GatewayCallOptions) -> Result<serde_json::Value> {
+    let ws_url = resolve_gateway_call_ws_url()?;
+    let token = resolve_gateway_call_token()?;
+    let params: serde_json::Value = serde_json::from_str(&opts.params)
+        .with_context(|| format!("invalid JSON for --params: {}", opts.params))?;
+    let timeout = Duration::from_millis(opts.timeout_ms.max(1_000));
+
+    let (mut ws, _) = tokio::time::timeout(timeout, tokio_tungstenite::connect_async(&ws_url))
+        .await
+        .context("gateway websocket connect timed out")?
+        .context("failed to connect to gateway websocket")?;
+
+    let challenge = tokio::time::timeout(timeout, recv_gateway_frame(&mut ws))
+        .await
+        .context("timed out waiting for connect.challenge")??;
+    if challenge.kind != "event" || challenge.event.as_deref() != Some("connect.challenge") {
+        return Err(anyhow!(
+            "expected connect.challenge, got type={} event={:?}",
+            challenge.kind,
+            challenge.event
+        ));
+    }
+
+    let connect = GatewayConnectRequest {
+        kind: "req",
+        id: "connect-1",
+        method: "connect",
+        params: GatewayConnectParams {
+            min_protocol: 3,
+            max_protocol: 3,
+            auth: GatewayConnectAuth { token: &token },
+        },
+    };
+    ws.send(Message::Text(serde_json::to_string(&connect)?))
+        .await
+        .context("failed to send gateway connect frame")?;
+
+    let hello = tokio::time::timeout(timeout, recv_gateway_frame(&mut ws))
+        .await
+        .context("timed out waiting for gateway hello")??;
+    if hello.kind != "res" || hello.ok != Some(true) {
+        return Err(anyhow!(format_gateway_error(
+            "gateway connect failed",
+            hello.error.as_ref()
+        )));
+    }
+
+    let request = GatewayRpcRequest {
+        kind: "req",
+        id: "call-1",
+        method: opts.method.clone(),
+        params,
+    };
+    ws.send(Message::Text(serde_json::to_string(&request)?))
+        .await
+        .with_context(|| format!("failed to send gateway method '{}'", opts.method))?;
+
+    loop {
+        let frame = tokio::time::timeout(timeout, recv_gateway_frame(&mut ws))
+            .await
+            .with_context(|| format!("timed out waiting for gateway method '{}'", opts.method))??;
+        if frame.kind != "res" || frame.id.as_deref() != Some("call-1") {
+            continue;
+        }
+        if frame.ok == Some(true) {
+            return Ok(frame.payload.unwrap_or_else(|| json!({})));
+        }
+        return Err(anyhow!(format_gateway_error(
+            &format!("gateway method '{}' failed", opts.method),
+            frame.error.as_ref()
+        )));
+    }
+}
+
+async fn recv_gateway_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Result<GatewayRpcFrame> {
+    while let Some(message) = ws.next().await {
+        let message = message.context("gateway websocket read failed")?;
+        match message {
+            Message::Text(text) => {
+                let frame: GatewayRpcFrame =
+                    serde_json::from_str(&text).context("invalid gateway websocket JSON")?;
+                return Ok(frame);
+            }
+            Message::Binary(bytes) => {
+                let frame: GatewayRpcFrame = serde_json::from_slice(&bytes)
+                    .context("invalid binary gateway websocket JSON")?;
+                return Ok(frame);
+            }
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => return Err(anyhow!("gateway websocket closed")),
+            _ => continue,
+        }
+    }
+    Err(anyhow!("gateway websocket closed"))
+}
+
+fn resolve_gateway_call_ws_url() -> Result<String> {
+    if let Some(raw) = env_string(&[
+        "MICROCLAW_GATEWAY_URL",
+        "OPENCLAW_GATEWAY_URL",
+        "GATEWAY_URL",
+    ]) {
+        return Ok(normalize_gateway_ws_url(&raw));
+    }
+
+    let cfg = Config::load().ok();
+    let host = env_string(&[
+        "MICROCLAW_GATEWAY_HOST",
+        "OPENCLAW_GATEWAY_HOST",
+        "GATEWAY_HOST",
+    ])
+    .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = env_string(&[
+        "MICROCLAW_GATEWAY_PORT",
+        "OPENCLAW_GATEWAY_PORT",
+        "GATEWAY_PORT",
+    ])
+    .and_then(|s| s.parse::<u16>().ok())
+    .or_else(|| cfg.as_ref().map(|c| c.web_port))
+    .unwrap_or(10961);
+    Ok(format!("ws://{host}:{port}/"))
+}
+
+fn resolve_gateway_call_token() -> Result<String> {
+    env_string(&[
+        "MICROCLAW_GATEWAY_TOKEN",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "GATEWAY_TOKEN",
+        "MICROCLAW_API_KEY",
+    ])
+    .ok_or_else(|| {
+        anyhow!(
+            "missing gateway token; set MICROCLAW_GATEWAY_TOKEN, OPENCLAW_GATEWAY_TOKEN, or GATEWAY_TOKEN"
+        )
+    })
+}
+
+fn env_string(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn normalize_gateway_ws_url(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        return format!("ws://{rest}/");
+    }
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        return format!("wss://{rest}/");
+    }
+    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        return format!("{trimmed}/");
+    }
+    format!("ws://{trimmed}/")
+}
+
+fn format_gateway_error(prefix: &str, err: Option<&GatewayRpcError>) -> String {
+    match err {
+        Some(err) => match (&err.code, &err.message) {
+            (Some(code), Some(message)) => format!("{prefix}: {code}: {message}"),
+            (_, Some(message)) => format!("{prefix}: {message}"),
+            (Some(code), None) => format!("{prefix}: {code}"),
+            (None, None) => prefix.to_string(),
+        },
+        None => prefix.to_string(),
+    }
 }
 
 fn install(opts: InstallOptions) -> Result<()> {
@@ -2277,6 +2558,32 @@ mod tests {
             _ => panic!("expected status action"),
         }
         assert!(GatewayCli::try_parse_from(["gateway", "status", "--bad"]).is_err());
+
+        let call = GatewayCli::try_parse_from([
+            "gateway",
+            "call",
+            "node.list",
+            "--params",
+            "{}",
+            "--timeout",
+            "5000",
+            "--json",
+        ])
+        .expect("parse call");
+        match call.action {
+            Some(GatewayAction::Call {
+                method,
+                params,
+                timeout,
+                json,
+            }) => {
+                assert_eq!(method, "node.list");
+                assert_eq!(params, "{}");
+                assert_eq!(timeout, 5000);
+                assert!(json);
+            }
+            _ => panic!("expected call action"),
+        }
     }
 
     #[test]
@@ -2294,6 +2601,26 @@ mod tests {
             }
             _ => panic!("expected service-run action"),
         }
+    }
+
+    #[test]
+    fn test_normalize_gateway_ws_url_supports_http_and_ws_inputs() {
+        assert_eq!(
+            normalize_gateway_ws_url("http://127.0.0.1:10961"),
+            "ws://127.0.0.1:10961/"
+        );
+        assert_eq!(
+            normalize_gateway_ws_url("https://gateway.example.com/"),
+            "wss://gateway.example.com/"
+        );
+        assert_eq!(
+            normalize_gateway_ws_url("ws://localhost:9000"),
+            "ws://localhost:9000/"
+        );
+        assert_eq!(
+            normalize_gateway_ws_url("gateway.example.com:9000"),
+            "ws://gateway.example.com:9000/"
+        );
     }
 
     #[test]

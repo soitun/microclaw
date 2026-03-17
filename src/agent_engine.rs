@@ -16,7 +16,7 @@ use microclaw_core::text::floor_char_boundary;
 use microclaw_observability::traces::{
     kv, kv_int, new_span_id, new_trace_id, now_unix_nano, SpanData,
 };
-use microclaw_storage::db::{call_blocking, StoredMessage};
+use microclaw_storage::db::{call_blocking, SessionSettings, StoredMessage};
 use opentelemetry_proto::tonic::trace::v1::Status;
 use opentelemetry_semantic_conventions::attribute::{
     GEN_AI_OPERATION_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM, GEN_AI_USAGE_INPUT_TOKENS,
@@ -270,7 +270,8 @@ fn build_provider_runtime_config(
 async fn resolve_effective_provider_and_model(
     state: &AppState,
     caller_channel: &str,
-) -> (ResolvedLlmProviderProfile, String) {
+    chat_id: i64,
+) -> (ResolvedLlmProviderProfile, String, Option<SessionSettings>) {
     let provider_alias = {
         let overrides = state.llm_provider_overrides.read().await;
         overrides
@@ -294,7 +295,20 @@ async fn resolve_effective_provider_and_model(
             .cloned()
             .unwrap_or_else(|| profile.default_model.clone())
     };
-    (profile, effective_model)
+    let session_settings = call_blocking(state.db.clone(), move |db| {
+        db.load_session_settings(chat_id)
+    })
+    .await
+    .ok()
+    .flatten();
+    let mut profile = profile;
+    if let Some(level) = session_settings
+        .as_ref()
+        .and_then(|settings| settings.thinking_level.as_deref())
+    {
+        profile.show_thinking = !level.eq_ignore_ascii_case("off");
+    }
+    (profile, effective_model, session_settings)
 }
 
 fn sanitize_xml(s: &str) -> String {
@@ -784,8 +798,8 @@ async fn process_with_agent_logic(
     let mut seen_failed_tool_details: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut empty_visible_reply_retry_attempted = false;
-    let (effective_profile, effective_model) =
-        resolve_effective_provider_and_model(state, context.caller_channel).await;
+    let (effective_profile, effective_model, _session_settings) =
+        resolve_effective_provider_and_model(state, context.caller_channel, chat_id).await;
     metrics.model = effective_model.clone();
     let scoped_provider = if effective_profile.alias != state.config.llm_provider {
         Some(crate::llm::create_provider(&build_provider_runtime_config(
@@ -2136,7 +2150,9 @@ pub(crate) fn strip_thinking(text: &str) -> String {
 
     let no_think = strip_tag_blocks(text, "<think>", "</think>");
     let no_thought = strip_tag_blocks(&no_think, "<thought>", "</thought>");
-    no_thought.trim().to_string()
+    let no_thinking = strip_tag_blocks(&no_thought, "<thinking>", "</thinking>");
+    let no_reasoning = strip_tag_blocks(&no_thinking, "<reasoning>", "</reasoning>");
+    no_reasoning.trim().to_string()
 }
 
 /// Extract text content from a Message for summarization/display.
@@ -2273,8 +2289,8 @@ async fn compact_messages(
         role: "user".into(),
         content: MessageContent::Text(format!("{summarize_prompt}\n\n---\n\n{summary_input}")),
     }];
-    let (effective_profile, effective_model) =
-        resolve_effective_provider_and_model(state, caller_channel).await;
+    let (effective_profile, effective_model, _session_settings) =
+        resolve_effective_provider_and_model(state, caller_channel, chat_id).await;
     let scoped_provider = if effective_profile.alias != state.config.llm_provider {
         Some(crate::llm::create_provider(&build_provider_runtime_config(
             state,
@@ -2884,6 +2900,12 @@ mod tests {
     #[test]
     fn test_strip_thinking_removes_thought_and_think_tags() {
         let text = "<thought>plan</thought>\n<think>private</think>\nVisible";
+        assert_eq!(strip_thinking(text), "Visible");
+    }
+
+    #[test]
+    fn test_strip_thinking_removes_thinking_and_reasoning_tags() {
+        let text = "<thinking>plan</thinking>\n<reasoning>private</reasoning>\nVisible";
         assert_eq!(strip_thinking(text), "Visible");
     }
 
