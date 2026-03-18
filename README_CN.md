@@ -163,9 +163,30 @@ Release tag 会发布官方容器镜像到：
 - `ghcr.io/microclaw/microclaw:<版本号>`
 - `docker.io/microclaw/microclaw:latest`，前提是仓库已配置 Docker Hub 发布凭据
 
-使用本地配置和数据目录挂载运行官方镜像：
+第一次从 GHCR 拉取时，可能需要先登录：
 
 ```sh
+docker login ghcr.io
+```
+
+用户名填 GitHub 用户名，密码填带 `read:packages` 权限的 Personal Access Token。
+
+如果你只是想先确认镜像能跑，最短命令是：
+
+```sh
+docker pull ghcr.io/microclaw/microclaw:latest
+docker run --rm -it \
+  -p 127.0.0.1:10961:10961 \
+  ghcr.io/microclaw/microclaw:latest
+```
+
+如果你准备长期使用，推荐把配置和运行时数据挂载到宿主机：
+
+```sh
+mkdir -p data tmp
+chmod a+r microclaw.config.yaml
+chmod -R a+rwX data tmp
+
 docker run --rm -it \
   -p 127.0.0.1:10961:10961 \
   -v "$(pwd)/microclaw.config.yaml:/app/microclaw.config.yaml:ro" \
@@ -174,12 +195,20 @@ docker run --rm -it \
   ghcr.io/microclaw/microclaw:latest
 ```
 
+这三个挂载分别用于：
+
+- `microclaw.config.yaml`：把配置保留在容器外，方便修改
+- `data/`：持久化数据库、会话、记忆、技能和运行时数据
+- `tmp/`：给容器内临时文件一个明确的可写目录
+
 镜像入口是 `microclaw`，因此可以直接覆盖子命令：
 
 ```sh
 docker run --rm ghcr.io/microclaw/microclaw:latest doctor
 docker run --rm ghcr.io/microclaw/microclaw:latest version
 ```
+
+如果启动时报 `Permission denied (os error 13)`，优先检查上面的 `chmod` 是否执行过，以及挂载路径是否存在。
 
 ### 从源码构建
 
