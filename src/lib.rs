@@ -9,6 +9,8 @@ pub mod config;
 pub mod doctor;
 pub mod embedding;
 pub mod gateway;
+pub mod hapi_engine;
+pub mod remote_agent;
 pub mod hooks;
 pub mod http_client;
 pub mod llm;

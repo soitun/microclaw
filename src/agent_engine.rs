@@ -132,7 +132,13 @@ pub async fn process_with_agent_with_events(
     });
     let (run_id, cancelled, notify) =
         run_control::register_run(context.caller_channel, context.chat_id, source_message_id).await;
-    let engine = DefaultAgentEngine;
+    let engine: Box<dyn AgentEngine> = if let Some(ref remote_cfg) = state.config.remote_agent {
+        Box::new(crate::remote_agent::RemoteAgentEngine::new(remote_cfg.clone()))
+    } else if let Some(ref hapi_cfg) = state.config.hapi {
+        Box::new(crate::hapi_engine::HapiAgentEngine::new(hapi_cfg.clone()))
+    } else {
+        Box::new(DefaultAgentEngine)
+    };
     let result = tokio::select! {
         _ = async {
             if run_control::is_cancelled(&cancelled) {

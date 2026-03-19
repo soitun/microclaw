@@ -347,6 +347,34 @@ impl Default for A2AConfig {
     }
 }
 
+/// Configuration for using a remote hapi hub as the agent backend.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HapiEngineConfig {
+    /// Base URL of the hapi hub (e.g. "http://localhost:3000")
+    pub url: String,
+    /// Access token for authenticating with the hapi hub (CLI_API_TOKEN value)
+    pub access_token: String,
+    /// If set, auto-approve all permission requests from the agent.
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
+fn default_remote_agent_timeout() -> u64 {
+    600
+}
+
+/// Configuration for the generic remote agent protocol.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteAgentConfig {
+    /// Endpoint URL (e.g. "http://localhost:3000/api/remote-agent")
+    pub url: String,
+    /// Bearer token for authentication
+    pub bearer_token: String,
+    /// Maximum wait time in seconds (default 600)
+    #[serde(default = "default_remote_agent_timeout")]
+    pub timeout_secs: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     // --- LLM / API ---
@@ -392,6 +420,12 @@ pub struct Config {
     pub subagents: SubagentConfig,
     #[serde(default)]
     pub a2a: A2AConfig,
+    /// When set, use a remote hapi hub as the agent backend instead of the built-in LLM.
+    #[serde(default)]
+    pub hapi: Option<HapiEngineConfig>,
+    /// When set, use the generic remote agent protocol as the agent backend.
+    #[serde(default)]
+    pub remote_agent: Option<RemoteAgentConfig>,
     /// OpenAI-compatible request-body overrides applied for all models/providers.
     /// Set a key to `null` to remove that field from the outgoing JSON body.
     #[serde(default)]
@@ -937,6 +971,7 @@ impl Config {
             show_thinking: false,
             subagents: SubagentConfig::default(),
             a2a: A2AConfig::default(),
+            hapi: None,
             openai_compat_body_overrides: HashMap::new(),
             openai_compat_body_overrides_by_provider: HashMap::new(),
             openai_compat_body_overrides_by_model: HashMap::new(),
