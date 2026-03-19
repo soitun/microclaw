@@ -741,12 +741,14 @@ fn truncate_retained_text(output: &mut RetainedText, limit: usize) {
 }
 
 fn map_exit_status(status: std::process::ExitStatus) -> acp::TerminalExitStatus {
-    let mut mapped = acp::TerminalExitStatus::new();
+    let mapped = acp::TerminalExitStatus::new();
     #[cfg(unix)]
-    {
+    let mapped = {
         use std::os::unix::process::ExitStatusExt;
-        mapped = mapped.signal(status.signal().map(|signal| signal.to_string()));
-    }
+        mapped.signal(status.signal().map(|signal| signal.to_string()))
+    };
+    #[cfg(not(unix))]
+    let mapped = mapped;
     mapped.exit_code(status.code().map(|code| code as u32))
 }
 
