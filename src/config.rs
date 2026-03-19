@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -267,7 +267,7 @@ pub struct ResolvedLlmProviderProfile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SubagentAcpConfig {
+pub struct SubagentAcpTargetConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -280,7 +280,7 @@ pub struct SubagentAcpConfig {
     pub auto_approve: bool,
 }
 
-impl Default for SubagentAcpConfig {
+impl Default for SubagentAcpTargetConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -289,6 +289,191 @@ impl Default for SubagentAcpConfig {
             env: HashMap::new(),
             auto_approve: default_subagent_acp_auto_approve(),
         }
+    }
+}
+
+impl SubagentAcpTargetConfig {
+    fn normalize(&mut self) {
+        self.command = self.command.trim().to_string();
+        self.args = self
+            .args
+            .drain(..)
+            .map(|arg| arg.trim().to_string())
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        self.env = self
+            .env
+            .drain()
+            .filter_map(|(key, value)| {
+                let normalized = key.trim().to_string();
+                if normalized.is_empty() {
+                    None
+                } else {
+                    Some((normalized, value))
+                }
+            })
+            .collect();
+    }
+
+    fn command_label(&self) -> String {
+        if self.command.trim().is_empty() {
+            "acp".to_string()
+        } else {
+            Path::new(&self.command)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("acp")
+                .to_string()
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedSubagentAcpTargetConfig {
+    pub name: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub auto_approve: bool,
+}
+
+impl ResolvedSubagentAcpTargetConfig {
+    pub fn model_label(&self) -> String {
+        if let Some(name) = self.name.as_deref() {
+            format!(
+                "{name}/{}",
+                SubagentAcpTargetConfig {
+                    enabled: true,
+                    command: self.command.clone(),
+                    args: self.args.clone(),
+                    env: self.env.clone(),
+                    auto_approve: self.auto_approve,
+                }
+                .command_label()
+            )
+        } else {
+            SubagentAcpTargetConfig {
+                enabled: true,
+                command: self.command.clone(),
+                args: self.args.clone(),
+                env: self.env.clone(),
+                auto_approve: self.auto_approve,
+            }
+            .command_label()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubagentAcpConfig {
+    #[serde(flatten)]
+    pub default_target: SubagentAcpTargetConfig,
+    #[serde(default, rename = "default_target")]
+    pub default_target_name: Option<String>,
+    #[serde(default)]
+    pub targets: HashMap<String, SubagentAcpTargetConfig>,
+}
+
+impl Default for SubagentAcpConfig {
+    fn default() -> Self {
+        Self {
+            default_target: SubagentAcpTargetConfig::default(),
+            default_target_name: None,
+            targets: HashMap::new(),
+        }
+    }
+}
+
+impl SubagentAcpConfig {
+    fn normalize(&mut self) {
+        self.default_target.normalize();
+        self.default_target_name = self
+            .default_target_name
+            .take()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        self.targets = self
+            .targets
+            .drain()
+            .filter_map(|(key, mut value)| {
+                let normalized = key.trim().to_string();
+                if normalized.is_empty() {
+                    return None;
+                }
+                value.normalize();
+                Some((normalized, value))
+            })
+            .collect();
+    }
+
+    pub fn resolve_target(
+        &self,
+        requested_target: Option<&str>,
+    ) -> Result<ResolvedSubagentAcpTargetConfig, String> {
+        let requested_target = requested_target
+            .map(str::trim)
+            .filter(|target| !target.is_empty());
+        if let Some(name) = requested_target {
+            return self.resolve_named_target(name);
+        }
+        if let Some(name) = self.default_target_name.as_deref() {
+            return self.resolve_named_target(name);
+        }
+        if !self.default_target.command.trim().is_empty() {
+            return Ok(ResolvedSubagentAcpTargetConfig {
+                name: None,
+                command: self.default_target.command.clone(),
+                args: self.default_target.args.clone(),
+                env: self.default_target.env.clone(),
+                auto_approve: self.default_target.auto_approve,
+            });
+        }
+
+        let mut enabled_targets = self
+            .targets
+            .iter()
+            .filter(|(_, target)| target.enabled)
+            .collect::<Vec<_>>();
+        enabled_targets.sort_by(|(left, _), (right, _)| left.cmp(right));
+        match enabled_targets.as_slice() {
+            [] => Err(
+                "ACP runtime is enabled but no command is configured. Set subagents.acp.command or add an enabled target under subagents.acp.targets."
+                    .into(),
+            ),
+            [(name, _)] => self.resolve_named_target(name),
+            _ => Err(
+                "ACP runtime has multiple enabled named targets. Set runtime_target or subagents.acp.default_target."
+                    .into(),
+            ),
+        }
+    }
+
+    fn resolve_named_target(
+        &self,
+        target_name: &str,
+    ) -> Result<ResolvedSubagentAcpTargetConfig, String> {
+        let target = self.targets.get(target_name).ok_or_else(|| {
+            format!(
+                "Unknown ACP runtime target '{target_name}'. Configure it under subagents.acp.targets."
+            )
+        })?;
+        if !target.enabled {
+            return Err(format!(
+                "ACP runtime target '{target_name}' is disabled. Enable it under subagents.acp.targets.{target_name}.enabled."
+            ));
+        }
+        if target.command.trim().is_empty() {
+            return Err(format!(
+                "ACP runtime target '{target_name}' is enabled but command is empty."
+            ));
+        }
+        Ok(ResolvedSubagentAcpTargetConfig {
+            name: Some(target_name.to_string()),
+            command: target.command.clone(),
+            args: target.args.clone(),
+            env: target.env.clone(),
+            auto_approve: target.auto_approve,
+        })
     }
 }
 
@@ -1428,29 +1613,7 @@ Use operator password + API keys for Web auth."
         }
         self.subagents.orchestrate_max_workers =
             self.subagents.orchestrate_max_workers.clamp(1, 12);
-        self.subagents.acp.command = self.subagents.acp.command.trim().to_string();
-        self.subagents.acp.args = self
-            .subagents
-            .acp
-            .args
-            .drain(..)
-            .map(|arg| arg.trim().to_string())
-            .filter(|arg| !arg.is_empty())
-            .collect();
-        self.subagents.acp.env = self
-            .subagents
-            .acp
-            .env
-            .drain()
-            .filter_map(|(key, value)| {
-                let normalized = key.trim().to_string();
-                if normalized.is_empty() {
-                    None
-                } else {
-                    Some((normalized, value))
-                }
-            })
-            .collect();
+        self.subagents.acp.normalize();
         self.tool_timeout_overrides = self
             .tool_timeout_overrides
             .drain()
@@ -2874,21 +3037,96 @@ subagents:
     env:
       " OPENAI_API_KEY ": abc
       "   ": ignored
+    default_target: "  worker  "
+    targets:
+      " worker ":
+        enabled: true
+        command: "  codex-worker  "
+        args: [" --fast "]
+        env:
+          " TOKEN ": xyz
 "#;
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
 
-        assert!(config.subagents.acp.enabled);
-        assert_eq!(config.subagents.acp.command, "codex");
+        assert!(config.subagents.acp.default_target.enabled);
+        assert_eq!(config.subagents.acp.default_target.command, "codex");
         assert_eq!(
-            config.subagents.acp.args,
+            config.subagents.acp.default_target.args,
             vec!["--model".to_string(), "gpt-5.4".to_string()]
         );
         assert_eq!(
-            config.subagents.acp.env.get("OPENAI_API_KEY"),
+            config
+                .subagents
+                .acp
+                .default_target
+                .env
+                .get("OPENAI_API_KEY"),
             Some(&"abc".to_string())
         );
-        assert!(!config.subagents.acp.env.contains_key("   "));
+        assert_eq!(
+            config.subagents.acp.default_target_name.as_deref(),
+            Some("worker")
+        );
+        assert!(!config.subagents.acp.default_target.env.contains_key("   "));
+        let target = config.subagents.acp.targets.get("worker").unwrap();
+        assert!(target.enabled);
+        assert_eq!(target.command, "codex-worker");
+        assert_eq!(target.args, vec!["--fast".to_string()]);
+        assert_eq!(target.env.get("TOKEN"), Some(&"xyz".to_string()));
+    }
+
+    #[test]
+    fn test_subagent_acp_resolve_named_target() {
+        let mut acp = SubagentAcpConfig::default();
+        acp.default_target.enabled = true;
+        acp.default_target.command = "codex".into();
+        acp.targets.insert(
+            "fast".into(),
+            SubagentAcpTargetConfig {
+                enabled: true,
+                command: "claude-code".into(),
+                args: vec!["--dangerously-skip-permissions".into()],
+                env: HashMap::new(),
+                auto_approve: false,
+            },
+        );
+        acp.normalize();
+
+        let resolved = acp.resolve_target(Some("fast")).unwrap();
+        assert_eq!(resolved.name.as_deref(), Some("fast"));
+        assert_eq!(resolved.command, "claude-code");
+        assert_eq!(
+            resolved.args,
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
+        assert!(!resolved.auto_approve);
+    }
+
+    #[test]
+    fn test_subagent_acp_resolve_requires_target_when_multiple_named_workers() {
+        let mut acp = SubagentAcpConfig::default();
+        acp.default_target.command.clear();
+        acp.targets.insert(
+            "one".into(),
+            SubagentAcpTargetConfig {
+                enabled: true,
+                command: "codex".into(),
+                ..SubagentAcpTargetConfig::default()
+            },
+        );
+        acp.targets.insert(
+            "two".into(),
+            SubagentAcpTargetConfig {
+                enabled: true,
+                command: "claude-code".into(),
+                ..SubagentAcpTargetConfig::default()
+            },
+        );
+        acp.normalize();
+
+        let err = acp.resolve_target(None).unwrap_err();
+        assert!(err.contains("multiple enabled named targets"));
     }
 
     #[test]

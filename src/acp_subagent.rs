@@ -15,10 +15,10 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::config::Config;
+use crate::config::{Config, ResolvedSubagentAcpTargetConfig};
 use crate::tools::{resolve_tool_working_dir, ToolAuthContext};
 use microclaw_core::text::floor_char_boundary;
-use microclaw_storage::db::Database;
+use microclaw_storage::db::{call_blocking, Database};
 
 const ACP_RUNTIME_PROVIDER: &str = "acp";
 const ACP_AGENT_STDERR_LIMIT_BYTES: usize = 16 * 1024;
@@ -33,6 +33,7 @@ pub struct AcpSubagentTaskParams {
     pub task: String,
     pub context: String,
     pub local_cancel: Arc<AtomicBool>,
+    pub target: ResolvedSubagentAcpTargetConfig,
 }
 
 #[derive(Default)]
@@ -111,15 +112,19 @@ impl TerminalSession {
 struct AcpSessionClient {
     working_dir: PathBuf,
     auto_approve: bool,
+    db: Arc<Database>,
+    run_id: String,
     transcript: Arc<Mutex<TranscriptState>>,
     terminals: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
 }
 
 impl AcpSessionClient {
-    fn new(working_dir: PathBuf, auto_approve: bool) -> Self {
+    fn new(working_dir: PathBuf, auto_approve: bool, db: Arc<Database>, run_id: String) -> Self {
         Self {
             working_dir,
             auto_approve,
+            db,
+            run_id,
             transcript: Arc::new(Mutex::new(TranscriptState::default())),
             terminals: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -156,6 +161,16 @@ impl AcpSessionClient {
         }
         self.transcript.lock().await.notes.push(note);
     }
+
+    async fn log_event(&self, event_type: &str, detail: Option<String>) {
+        let db = self.db.clone();
+        let run_id = self.run_id.clone();
+        let event_type = event_type.to_string();
+        let _ = call_blocking(db, move |db| {
+            db.append_subagent_event(&run_id, &event_type, detail.as_deref())
+        })
+        .await;
+    }
 }
 
 #[async_trait(?Send)]
@@ -171,6 +186,8 @@ impl Client for AcpSessionClient {
             .clone()
             .unwrap_or_else(|| "ACP tool call".to_string());
         self.append_note(format!("[acp] permission requested: {title}"))
+            .await;
+        self.log_event("acp_permission_requested", Some(format!("title={title}")))
             .await;
 
         let preferred = if self.auto_approve {
@@ -198,6 +215,11 @@ impl Client for AcpSessionClient {
                 RequestPermissionOutcome::Cancelled,
             ));
         };
+        self.log_event(
+            "acp_permission_selected",
+            Some(format!("option_id={}", selected.option_id.0)),
+        )
+        .await;
 
         Ok(acp::RequestPermissionResponse::new(
             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
@@ -224,6 +246,8 @@ impl Client for AcpSessionClient {
                     tool_call.title
                 };
                 self.append_note(format!("[acp] tool call: {title}")).await;
+                self.log_event("acp_tool_call", Some(format!("title={title}")))
+                    .await;
             }
             acp::SessionUpdate::ToolCallUpdate(update) => {
                 let title = update
@@ -234,6 +258,11 @@ impl Client for AcpSessionClient {
                 if let Some(status) = update.fields.status {
                     self.append_note(format!("[acp] tool update: {title} ({status:?})"))
                         .await;
+                    self.log_event(
+                        "acp_tool_update",
+                        Some(format!("title={title} status={status:?}")),
+                    )
+                    .await;
                 }
             }
             acp::SessionUpdate::Plan(plan) => {
@@ -245,6 +274,7 @@ impl Client for AcpSessionClient {
                         .collect::<Vec<_>>()
                         .join(" | ");
                     self.append_note(format!("[acp] plan: {items}")).await;
+                    self.log_event("acp_plan", Some(items)).await;
                 }
             }
             _ => {}
@@ -265,6 +295,11 @@ impl Client for AcpSessionClient {
         tokio::fs::write(path, args.content)
             .await
             .map_err(internal_error)?;
+        self.log_event(
+            "acp_write_text_file",
+            Some(format!("path={}", args.path.display())),
+        )
+        .await;
         Ok(acp::WriteTextFileResponse::new())
     }
 
@@ -277,6 +312,11 @@ impl Client for AcpSessionClient {
             .await
             .map_err(internal_error)?;
         let selected = slice_lines(&content, args.line, args.limit);
+        self.log_event(
+            "acp_read_text_file",
+            Some(format!("path={}", args.path.display())),
+        )
+        .await;
         Ok(acp::ReadTextFileResponse::new(selected))
     }
 
@@ -296,7 +336,7 @@ impl Client for AcpSessionClient {
             .clamp(1024, ACP_TERMINAL_OUTPUT_LIMIT_BYTES);
         let mut cmd = tokio::process::Command::new(&args.command);
         cmd.args(&args.args)
-            .current_dir(cwd)
+            .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -332,6 +372,11 @@ impl Client for AcpSessionClient {
             .lock()
             .await
             .insert(terminal_id.clone(), session);
+        self.log_event(
+            "acp_create_terminal",
+            Some(format!("command={} cwd={}", args.command, cwd.display())),
+        )
+        .await;
         Ok(acp::CreateTerminalResponse::new(terminal_id))
     }
 
@@ -361,6 +406,11 @@ impl Client for AcpSessionClient {
         {
             let _ = session.kill().await;
         }
+        self.log_event(
+            "acp_release_terminal",
+            Some(format!("terminal_id={}", args.terminal_id.0)),
+        )
+        .await;
         Ok(acp::ReleaseTerminalResponse::new())
     }
 
@@ -375,7 +425,13 @@ impl Client for AcpSessionClient {
             .get(args.terminal_id.0.as_ref())
             .cloned()
             .ok_or_else(acp::Error::invalid_params)?;
-        session.wait_for_exit().await
+        let response = session.wait_for_exit().await?;
+        self.log_event(
+            "acp_wait_terminal_exit",
+            Some(format!("terminal_id={}", args.terminal_id.0)),
+        )
+        .await;
+        Ok(response)
     }
 
     async fn kill_terminal(
@@ -390,6 +446,11 @@ impl Client for AcpSessionClient {
             .cloned()
             .ok_or_else(acp::Error::invalid_params)?;
         session.kill().await?;
+        self.log_event(
+            "acp_kill_terminal",
+            Some(format!("terminal_id={}", args.terminal_id.0)),
+        )
+        .await;
         Ok(acp::KillTerminalResponse::new())
     }
 }
@@ -418,14 +479,14 @@ async fn run_acp_subagent_task_inner(
         .await
         .map_err(|e| format!("Failed creating ACP working directory: {e}"))?;
 
-    let command = params.config.subagents.acp.command.clone();
+    let command = params.target.command.clone();
     if command.trim().is_empty() {
-        return Err("ACP runtime is enabled but subagents.acp.command is empty".into());
+        return Err("ACP runtime target command is empty".into());
     }
 
     let mut child = tokio::process::Command::new(&command);
     child
-        .args(&params.config.subagents.acp.args)
+        .args(&params.target.args)
         .current_dir(&working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -440,7 +501,10 @@ async fn run_acp_subagent_task_inner(
             "MICROCLAW_SUBAGENT_WORKDIR",
             working_dir.display().to_string(),
         );
-    for (key, value) in &params.config.subagents.acp.env {
+    if let Some(target_name) = params.target.name.as_deref() {
+        child.env("MICROCLAW_SUBAGENT_RUNTIME_TARGET", target_name);
+    }
+    for (key, value) in &params.target.env {
         child.env(key, value);
     }
 
@@ -467,7 +531,9 @@ async fn run_acp_subagent_task_inner(
 
     let client = Arc::new(AcpSessionClient::new(
         working_dir.clone(),
-        params.config.subagents.acp.auto_approve,
+        params.target.auto_approve,
+        params.db.clone(),
+        params.run_id.clone(),
     ));
     let prompt_text = if params.context.is_empty() {
         params.task.clone()
@@ -555,20 +621,22 @@ async fn run_acp_subagent_task_inner(
     Ok((final_text, artifact_json, 0, 0))
 }
 
-pub fn acp_runtime_model(config: &Config) -> String {
-    if config.subagents.acp.command.trim().is_empty() {
-        "acp".to_string()
-    } else {
-        Path::new(&config.subagents.acp.command)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("acp")
-            .to_string()
+pub fn acp_runtime_model(target: &ResolvedSubagentAcpTargetConfig) -> String {
+    target.model_label()
+}
+
+pub fn acp_runtime_provider(target_name: Option<&str>) -> String {
+    match target_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("{ACP_RUNTIME_PROVIDER}:{name}"),
+        None => ACP_RUNTIME_PROVIDER.to_string(),
     }
 }
 
-pub fn acp_runtime_provider() -> &'static str {
-    ACP_RUNTIME_PROVIDER
+pub fn acp_runtime_target_from_provider(provider: &str) -> Option<String> {
+    provider
+        .strip_prefix(&format!("{ACP_RUNTIME_PROVIDER}:"))
+        .map(ToOwned::to_owned)
+        .filter(|name| !name.trim().is_empty())
 }
 
 fn resolve_session_working_dir(
@@ -703,12 +771,21 @@ fn internal_error(err: impl std::fmt::Display) -> acp::Error {
 mod tests {
     use super::*;
 
+    fn test_db() -> Arc<Database> {
+        let dir = std::env::temp_dir().join(format!(
+            "microclaw_acp_subagent_test_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Arc::new(Database::new(dir.to_str().unwrap()).unwrap())
+    }
+
     #[tokio::test]
     async fn test_acp_client_read_write_stays_inside_workdir() {
         let root =
             std::env::temp_dir().join(format!("microclaw_acp_client_{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
-        let client = AcpSessionClient::new(root.clone(), true);
+        let client = AcpSessionClient::new(root.clone(), true, test_db(), "run-1".into());
         let session_id = acp::SessionId::new("test-session");
 
         client
@@ -744,7 +821,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("microclaw_acp_term_{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
-        let client = AcpSessionClient::new(root.clone(), true);
+        let client = AcpSessionClient::new(root.clone(), true, test_db(), "run-2".into());
         let session_id = acp::SessionId::new("test-session");
 
         let created = client
@@ -784,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_permission_auto_approve_prefers_allow() {
-        let client = AcpSessionClient::new(std::env::temp_dir(), true);
+        let client = AcpSessionClient::new(std::env::temp_dir(), true, test_db(), "run-3".into());
         let session_id = acp::SessionId::new("test-session");
         let response = client
             .request_permission(acp::RequestPermissionRequest::new(
@@ -812,5 +889,16 @@ mod tests {
             panic!("expected selected permission outcome");
         };
         assert_eq!(selected.option_id.0.as_ref(), "allow");
+    }
+
+    #[test]
+    fn test_acp_runtime_provider_round_trips_target_name() {
+        let provider = acp_runtime_provider(Some("worker"));
+        assert_eq!(provider, "acp:worker");
+        assert_eq!(
+            acp_runtime_target_from_provider(&provider).as_deref(),
+            Some("worker")
+        );
+        assert_eq!(acp_runtime_target_from_provider("acp"), None);
     }
 }
