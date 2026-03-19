@@ -781,6 +781,16 @@ mod tests {
         Arc::new(Database::new(dir.to_str().unwrap()).unwrap())
     }
 
+    #[cfg(unix)]
+    fn test_terminal_command() -> (&'static str, Vec<String>) {
+        ("/bin/sh", vec!["-c".into(), "printf 'hello'".into()])
+    }
+
+    #[cfg(windows)]
+    fn test_terminal_command() -> (&'static str, Vec<String>) {
+        ("cmd.exe", vec!["/C".into(), "echo hello".into()])
+    }
+
     #[tokio::test]
     async fn test_acp_client_read_write_stays_inside_workdir() {
         let root =
@@ -824,11 +834,11 @@ mod tests {
         tokio::fs::create_dir_all(&root).await.unwrap();
         let client = AcpSessionClient::new(root.clone(), true, test_db(), "run-2".into());
         let session_id = acp::SessionId::new("test-session");
+        let (command, args) = test_terminal_command();
 
         let created = client
             .create_terminal(
-                acp::CreateTerminalRequest::new(session_id.clone(), "/bin/sh")
-                    .args(vec!["-c".into(), "printf 'hello'".into()]),
+                acp::CreateTerminalRequest::new(session_id.clone(), command).args(args),
             )
             .await
             .unwrap();
