@@ -433,6 +433,9 @@ cp mcp.hapi-bridge.example.json <data_dir>/mcp.d/hapi-bridge.json
 
 详细操作可见：`docs/operations/hapi-bridge.md`。
 
+如果你要把 `@tencent-weixin/openclaw-weixin` 接到 MicroClaw，请看：
+`docs/operations/openclaw-weixin-bridge.md`。
+
 ### 在 macOS 上接入 Peekaboo MCP（桌面自动化）
 
 [Peekaboo](https://github.com/steipete/Peekaboo) 是一个 macOS 桌面自动化 MCP server。MicroClaw 可通过 `stdio` 直接接入（无需修改运行时代码）。

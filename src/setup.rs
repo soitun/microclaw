@@ -29,7 +29,7 @@ use microclaw_core::error::MicroClawError;
 use microclaw_core::text::floor_char_boundary;
 
 use crate::channels::{
-    dingtalk, email, feishu, imessage, irc, matrix, nostr, qq, signal, slack, whatsapp,
+    dingtalk, email, feishu, imessage, irc, matrix, nostr, qq, signal, slack, weixin, whatsapp,
 };
 use crate::setup_def::DynamicChannelDef;
 
@@ -46,6 +46,7 @@ const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
     signal::SETUP_DEF,
     dingtalk::SETUP_DEF,
     qq::SETUP_DEF,
+    weixin::SETUP_DEF,
 ];
 
 /// Build the setup-wizard field key from channel name + yaml key.

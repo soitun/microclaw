@@ -500,6 +500,9 @@ cp mcp.hapi-bridge.example.json <data_dir>/mcp.d/hapi-bridge.json
 
 Detailed ops guide: `docs/operations/hapi-bridge.md`.
 
+OpenClaw Weixin sidecar compatibility guide:
+`docs/operations/openclaw-weixin-bridge.md`.
+
 Example:
 
 ```json
