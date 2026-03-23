@@ -7,6 +7,7 @@ Native support includes:
 - QR login
 - persisted bot credentials
 - long polling via `getupdates`
+- native typing indicator via `getconfig` + `sendtyping`
 - persisted `context_token` cache
 - persisted `get_updates_buf`
 - text replies via `sendmessage`
@@ -81,6 +82,7 @@ Native credentials are stored under:
 ## Runtime Behavior
 
 - Polling starts automatically on `microclaw start` once credentials exist for that account.
+- During agent execution, MicroClaw sends native Weixin typing keepalives when a `typing_ticket` is available.
 - Replying requires a previously seen `context_token`, so proactive sends to a never-seen user are not possible yet.
 - Outbound native delivery supports text, image, video, and generic file attachments.
 - If login has not been completed yet, runtime startup keeps the adapter idle and prints a warning until `microclaw weixin login` is run.

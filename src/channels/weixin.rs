@@ -39,11 +39,17 @@ const DEFAULT_API_TIMEOUT_MS: u64 = 15_000;
 const RETRY_DELAY_MS: u64 = 2_000;
 const BACKOFF_DELAY_MS: u64 = 30_000;
 const MAX_CONSECUTIVE_FAILURES: usize = 3;
+const CONFIG_CACHE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const CONFIG_CACHE_INITIAL_RETRY_MS: u64 = 2_000;
+const CONFIG_CACHE_MAX_RETRY_MS: u64 = 60 * 60 * 1000;
+const TYPING_KEEPALIVE_MS: u64 = 5_000;
 const SESSION_EXPIRED_ERRCODE: i64 = -14;
 const MSG_TYPE_USER: i32 = 1;
 const MSG_TYPE_BOT: i32 = 2;
 const MSG_STATE_FINISH: i32 = 2;
 const MSG_ITEM_TEXT: i32 = 1;
+const TYPING_STATUS_TYPING: i32 = 1;
+const TYPING_STATUS_CANCEL: i32 = 2;
 
 pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
     name: CHANNEL_KEY,
@@ -328,6 +334,16 @@ struct WeixinGetUploadUrlResp {
     thumb_upload_param: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct WeixinGetConfigResp {
+    #[serde(default)]
+    ret: i64,
+    #[serde(default)]
+    errmsg: Option<String>,
+    #[serde(default)]
+    typing_ticket: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoredWeixinAccount {
     #[serde(default)]
@@ -376,9 +392,29 @@ pub struct WeixinRuntimeContext {
 }
 
 static WEIXIN_CONTEXT_TOKENS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static WEIXIN_TYPING_TICKETS: OnceLock<Mutex<HashMap<String, TypingTicketCacheEntry>>> =
+    OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct TypingTicketCacheEntry {
+    typing_ticket: String,
+    next_fetch_at_ms: u64,
+    retry_delay_ms: u64,
+}
 
 fn context_token_registry() -> &'static Mutex<HashMap<String, String>> {
     WEIXIN_CONTEXT_TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn typing_ticket_registry() -> &'static Mutex<HashMap<String, TypingTicketCacheEntry>> {
+    WEIXIN_TYPING_TICKETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn context_token_key(channel_name: &str, external_chat_id: &str) -> String {
@@ -645,6 +681,87 @@ fn build_cdn_upload_url(cdn_base_url: &str, upload_param: &str, filekey: &str) -
     )
 }
 
+fn typing_ticket_cache_key(channel_name: &str, external_chat_id: &str) -> String {
+    format!("{channel_name}:{external_chat_id}")
+}
+
+async fn get_cached_typing_ticket(
+    client: &reqwest::Client,
+    runtime: &WeixinRuntimeContext,
+    account: &NativeWeixinAccount,
+    external_chat_id: &str,
+    context_token: Option<&str>,
+) -> Option<String> {
+    let cache_key = typing_ticket_cache_key(&runtime.channel_name, external_chat_id);
+    let now_ms = now_epoch_ms();
+
+    if let Ok(guard) = typing_ticket_registry().lock() {
+        if let Some(entry) = guard.get(&cache_key) {
+            if now_ms < entry.next_fetch_at_ms && !entry.typing_ticket.trim().is_empty() {
+                return Some(entry.typing_ticket.clone());
+            }
+        }
+    }
+
+    match get_config(client, account, external_chat_id, context_token).await {
+        Ok(response) if response.ret == 0 => {
+            let typing_ticket = response.typing_ticket.trim().to_string();
+            let next_fetch_at_ms = now_ms + CONFIG_CACHE_TTL_MS;
+            if let Ok(mut guard) = typing_ticket_registry().lock() {
+                guard.insert(
+                    cache_key,
+                    TypingTicketCacheEntry {
+                        typing_ticket: typing_ticket.clone(),
+                        next_fetch_at_ms,
+                        retry_delay_ms: CONFIG_CACHE_INITIAL_RETRY_MS,
+                    },
+                );
+            }
+            if typing_ticket.is_empty() {
+                None
+            } else {
+                Some(typing_ticket)
+            }
+        }
+        Ok(response) => {
+            if let Ok(mut guard) = typing_ticket_registry().lock() {
+                let entry = guard.entry(cache_key).or_insert(TypingTicketCacheEntry {
+                    typing_ticket: String::new(),
+                    next_fetch_at_ms: now_ms + CONFIG_CACHE_INITIAL_RETRY_MS,
+                    retry_delay_ms: CONFIG_CACHE_INITIAL_RETRY_MS,
+                });
+                entry.next_fetch_at_ms = now_ms + entry.retry_delay_ms;
+                entry.retry_delay_ms =
+                    (entry.retry_delay_ms.saturating_mul(2)).min(CONFIG_CACHE_MAX_RETRY_MS);
+            }
+            warn!(
+                "OpenClaw Weixin getconfig returned ret={} for '{}': {}",
+                response.ret,
+                runtime.channel_name,
+                response.errmsg.unwrap_or_default()
+            );
+            None
+        }
+        Err(err) => {
+            if let Ok(mut guard) = typing_ticket_registry().lock() {
+                let entry = guard.entry(cache_key).or_insert(TypingTicketCacheEntry {
+                    typing_ticket: String::new(),
+                    next_fetch_at_ms: now_ms + CONFIG_CACHE_INITIAL_RETRY_MS,
+                    retry_delay_ms: CONFIG_CACHE_INITIAL_RETRY_MS,
+                });
+                entry.next_fetch_at_ms = now_ms + entry.retry_delay_ms;
+                entry.retry_delay_ms =
+                    (entry.retry_delay_ms.saturating_mul(2)).min(CONFIG_CACHE_MAX_RETRY_MS);
+            }
+            warn!(
+                "OpenClaw Weixin getconfig failed for '{}'/{}: {}",
+                runtime.channel_name, external_chat_id, err
+            );
+            None
+        }
+    }
+}
+
 fn ensure_trailing_slash(base_url: &str) -> String {
     if base_url.ends_with('/') {
         base_url.to_string()
@@ -889,6 +1006,60 @@ async fn get_upload_url(
     )
     .await?;
     serde_json::from_str(&raw).map_err(|e| format!("Failed to parse getuploadurl response: {e}"))
+}
+
+async fn get_config(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    ilink_user_id: &str,
+    context_token: Option<&str>,
+) -> Result<WeixinGetConfigResp, String> {
+    let body = serde_json::json!({
+        "ilink_user_id": ilink_user_id,
+        "context_token": context_token.filter(|value| !value.trim().is_empty()),
+        "base_info": {
+            "channel_version": env!("CARGO_PKG_VERSION")
+        }
+    })
+    .to_string();
+    let raw = api_post(
+        client,
+        &account.base_url,
+        "ilink/bot/getconfig",
+        body,
+        Some(&account.token),
+        DEFAULT_API_TIMEOUT_MS,
+    )
+    .await?;
+    serde_json::from_str(&raw).map_err(|e| format!("Failed to parse getconfig response: {e}"))
+}
+
+async fn send_typing(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    ilink_user_id: &str,
+    typing_ticket: &str,
+    status: i32,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "ilink_user_id": ilink_user_id,
+        "typing_ticket": typing_ticket,
+        "status": status,
+        "base_info": {
+            "channel_version": env!("CARGO_PKG_VERSION")
+        }
+    })
+    .to_string();
+    let _ = api_post(
+        client,
+        &account.base_url,
+        "ilink/bot/sendtyping",
+        body,
+        Some(&account.token),
+        DEFAULT_API_TIMEOUT_MS,
+    )
+    .await?;
+    Ok(())
 }
 
 fn generate_client_id() -> String {
@@ -1658,6 +1829,61 @@ async fn process_weixin_inbound_message(
         return;
     }
 
+    let typing_account = WeixinAdapter::from_runtime(&runtime_ctx)
+        .load_native_account()
+        .ok();
+    let typing_ticket = if let Some(account) = typing_account.as_ref() {
+        get_cached_typing_ticket(
+            &reqwest::Client::new(),
+            &runtime_ctx,
+            account,
+            sender,
+            Some(&normalized.context_token),
+        )
+        .await
+    } else {
+        None
+    };
+    let typing_state = if let (Some(account), Some(typing_ticket)) = (typing_account, typing_ticket)
+    {
+        let task_account = account.clone();
+        let task_ticket = typing_ticket.clone();
+        let client = reqwest::Client::new();
+        let sender_id = sender.to_string();
+        let runtime_channel = runtime_ctx.channel_name.clone();
+        let task = tokio::spawn(async move {
+            let _ = send_typing(
+                &client,
+                &task_account,
+                &sender_id,
+                &task_ticket,
+                TYPING_STATUS_TYPING,
+            )
+            .await;
+            loop {
+                tokio::time::sleep(Duration::from_millis(TYPING_KEEPALIVE_MS)).await;
+                if let Err(err) = send_typing(
+                    &client,
+                    &task_account,
+                    &sender_id,
+                    &task_ticket,
+                    TYPING_STATUS_TYPING,
+                )
+                .await
+                {
+                    warn!(
+                        "OpenClaw Weixin typing keepalive failed for '{}' / '{}': {}",
+                        runtime_channel, sender_id, err
+                    );
+                    break;
+                }
+            }
+        });
+        Some((task, account, typing_ticket))
+    } else {
+        None
+    };
+
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     match process_with_agent_with_events(
         &app_state,
@@ -1673,6 +1899,17 @@ async fn process_weixin_inbound_message(
     .await
     {
         Ok(response) => {
+            if let Some((task, account, typing_ticket)) = typing_state {
+                task.abort();
+                let _ = send_typing(
+                    &reqwest::Client::new(),
+                    &account,
+                    sender,
+                    &typing_ticket,
+                    TYPING_STATUS_CANCEL,
+                )
+                .await;
+            }
             drop(event_tx);
             let mut used_send_message_tool = false;
             while let Some(event) = event_rx.recv().await {
@@ -1714,6 +1951,17 @@ async fn process_weixin_inbound_message(
             }
         }
         Err(e) => {
+            if let Some((task, account, typing_ticket)) = typing_state {
+                task.abort();
+                let _ = send_typing(
+                    &reqwest::Client::new(),
+                    &account,
+                    sender,
+                    &typing_ticket,
+                    TYPING_STATUS_CANCEL,
+                )
+                .await;
+            }
             error!("OpenClaw Weixin: error processing message: {e}");
         }
     }
