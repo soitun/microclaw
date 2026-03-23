@@ -641,6 +641,16 @@ struct UploadedWeixinMedia {
     file_size_ciphertext: u64,
 }
 
+struct GetUploadUrlRequest<'a> {
+    filekey: &'a str,
+    media_type: i32,
+    to_user_id: &'a str,
+    rawsize: u64,
+    rawfilemd5: &'a str,
+    filesize: u64,
+    aeskey_hex: &'a str,
+}
+
 fn infer_attachment_kind(file_path: &Path) -> WeixinAttachmentKind {
     let ext = file_path
         .extension()
@@ -974,23 +984,17 @@ async fn get_updates(
 async fn get_upload_url(
     client: &reqwest::Client,
     account: &NativeWeixinAccount,
-    filekey: &str,
-    media_type: i32,
-    to_user_id: &str,
-    rawsize: u64,
-    rawfilemd5: &str,
-    filesize: u64,
-    aeskey_hex: &str,
+    request: GetUploadUrlRequest<'_>,
 ) -> Result<WeixinGetUploadUrlResp, String> {
     let body = serde_json::json!({
-        "filekey": filekey,
-        "media_type": media_type,
-        "to_user_id": to_user_id,
-        "rawsize": rawsize,
-        "rawfilemd5": rawfilemd5,
-        "filesize": filesize,
+        "filekey": request.filekey,
+        "media_type": request.media_type,
+        "to_user_id": request.to_user_id,
+        "rawsize": request.rawsize,
+        "rawfilemd5": request.rawfilemd5,
+        "filesize": request.filesize,
         "no_need_thumb": true,
-        "aeskey": aeskey_hex,
+        "aeskey": request.aeskey_hex,
         "base_info": {
             "channel_version": env!("CARGO_PKG_VERSION")
         }
@@ -1166,13 +1170,15 @@ async fn upload_media_native(
     let upload_url = get_upload_url(
         client,
         account,
-        &filekey,
-        media_type,
-        to_user_id,
-        rawsize,
-        &rawfilemd5,
-        file_size_ciphertext,
-        &aeskey_hex,
+        GetUploadUrlRequest {
+            filekey: &filekey,
+            media_type,
+            to_user_id,
+            rawsize,
+            rawfilemd5: &rawfilemd5,
+            filesize: file_size_ciphertext,
+            aeskey_hex: &aeskey_hex,
+        },
     )
     .await?;
     if upload_url.upload_param.trim().is_empty() {
