@@ -16,6 +16,8 @@ use microclaw_core::llm_types::{Message, MessageContent, ResponseContentBlock};
 use microclaw_core::text::floor_char_boundary;
 use microclaw_storage::db::call_blocking;
 
+const SCHEDULER_INTER_TASK_DELAY: Duration = Duration::from_secs(2);
+
 pub fn spawn_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
         info!("Scheduler started");
@@ -73,7 +75,8 @@ async fn run_due_tasks(state: &Arc<AppState>) {
         }
     };
 
-    for task in tasks {
+    let total_tasks = tasks.len();
+    for (index, task) in tasks.into_iter().enumerate() {
         info!(
             "Scheduler: executing task #{} for chat {}",
             task.id, task.chat_id
@@ -219,7 +222,17 @@ async fn run_due_tasks(state: &Arc<AppState>) {
         {
             error!("Scheduler: failed to update task #{}: {e}", task.id);
         }
+
+        // Due tasks naturally bunch on the same minute boundary; a short pause
+        // between runs reduces downstream provider/channel rate-limit bursts.
+        if should_delay_before_next_scheduled_task(index, total_tasks) {
+            tokio::time::sleep(SCHEDULER_INTER_TASK_DELAY).await;
+        }
     }
+}
+
+fn should_delay_before_next_scheduled_task(index: usize, total_tasks: usize) -> bool {
+    total_tasks > 1 && index + 1 < total_tasks
 }
 
 const REFLECTOR_SYSTEM_PROMPT: &str = r#"You are a memory extraction specialist. Extract durable, factual information from conversations.
@@ -714,5 +727,17 @@ mod tests {
         let arr = parse_reflector_json_array(raw).expect("should parse");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["content"], "y");
+    }
+
+    #[test]
+    fn test_should_delay_before_next_scheduled_task_for_non_last_items() {
+        assert!(should_delay_before_next_scheduled_task(0, 3));
+        assert!(should_delay_before_next_scheduled_task(1, 3));
+    }
+
+    #[test]
+    fn test_should_delay_before_next_scheduled_task_skips_last_or_only_item() {
+        assert!(!should_delay_before_next_scheduled_task(0, 1));
+        assert!(!should_delay_before_next_scheduled_task(2, 3));
     }
 }
