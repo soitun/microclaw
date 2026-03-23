@@ -372,11 +372,7 @@ pub async fn run(
         &mut llm_model_overrides,
         build_weixin_runtime_contexts,
         |runtime, reg| {
-            reg.register(Arc::new(WeixinAdapter::new(
-                runtime.channel_name.clone(),
-                runtime.account_id.clone(),
-                runtime.send_command.clone(),
-            )));
+            reg.register(Arc::new(WeixinAdapter::from_runtime(runtime)));
         },
         |runtime| {
             runtime

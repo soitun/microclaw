@@ -1,6 +1,15 @@
-# OpenClaw Weixin Bridge Examples
+# OpenClaw Weixin Examples
 
-This folder contains starter pieces for wiring a Weixin sidecar into MicroClaw.
+This folder contains bridge helpers for wiring a Weixin sidecar into MicroClaw.
+
+If you want pure Rust text support, prefer native mode and run:
+
+```sh
+microclaw weixin login
+microclaw start
+```
+
+Use the files in this folder when you want to keep a Node sidecar such as `@tencent-weixin/openclaw-weixin`.
 
 Files:
 
@@ -8,7 +17,7 @@ Files:
   - Example `channels.openclaw-weixin.send_command` target.
   - Reads `MICROCLAW_WEIXIN_PAYLOAD` from MicroClaw and forwards it to a local HTTP bridge.
 
-Typical config:
+Typical bridge config:
 
 ```yaml
 channels:

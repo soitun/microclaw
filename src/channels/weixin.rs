@@ -1,12 +1,15 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use axum::http::HeaderMap;
 use axum::{Json, Router};
-use serde::Deserialize;
-use tracing::{error, info};
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use tracing::{error, info, warn};
 
 use crate::agent_engine::process_with_agent_with_events;
 use crate::agent_engine::{AgentEvent, AgentRequestContext};
@@ -15,6 +18,7 @@ use crate::channels::startup_guard::{
     should_drop_pre_start_message, should_drop_recent_duplicate_message,
 };
 use crate::chat_commands::{handle_chat_command, is_slash_command, unknown_command_response};
+use crate::config::Config;
 use crate::runtime::AppState;
 use crate::setup_def::{ChannelFieldDef, DynamicChannelDef};
 use microclaw_channels::channel::ConversationKind;
@@ -22,14 +26,42 @@ use microclaw_channels::channel_adapter::ChannelAdapter;
 use microclaw_storage::db::{call_blocking, StoredMessage};
 
 const CHANNEL_KEY: &str = "openclaw-weixin";
+const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+const DEFAULT_WEBHOOK_PATH: &str = "/openclaw-weixin/messages";
+const BOT_TYPE: &str = "3";
+const LONG_POLL_TIMEOUT_MS: u64 = 35_000;
+const QR_POLL_TIMEOUT_MS: u64 = 35_000;
+const DEFAULT_API_TIMEOUT_MS: u64 = 15_000;
+const RETRY_DELAY_MS: u64 = 2_000;
+const BACKOFF_DELAY_MS: u64 = 30_000;
+const MAX_CONSECUTIVE_FAILURES: usize = 3;
+const SESSION_EXPIRED_ERRCODE: i64 = -14;
+const MSG_TYPE_USER: i32 = 1;
+const MSG_TYPE_BOT: i32 = 2;
+const MSG_STATE_FINISH: i32 = 2;
+const MSG_ITEM_TEXT: i32 = 1;
 
 pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
     name: CHANNEL_KEY,
-    presence_keys: &["send_command"],
+    presence_keys: &["send_command", "base_url"],
     fields: &[
         ChannelFieldDef {
+            yaml_key: "mode",
+            label: "OpenClaw Weixin mode (auto/native/bridge)",
+            default: "auto",
+            secret: false,
+            required: false,
+        },
+        ChannelFieldDef {
+            yaml_key: "base_url",
+            label: "OpenClaw Weixin API base URL",
+            default: DEFAULT_BASE_URL,
+            secret: false,
+            required: false,
+        },
+        ChannelFieldDef {
             yaml_key: "send_command",
-            label: "OpenClaw Weixin send command (env MICROCLAW_WEIXIN_*)",
+            label: "OpenClaw Weixin send command (bridge mode; env MICROCLAW_WEIXIN_*)",
             default: "",
             secret: false,
             required: false,
@@ -37,7 +69,7 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
         ChannelFieldDef {
             yaml_key: "webhook_path",
             label: "OpenClaw Weixin webhook path (default /openclaw-weixin/messages)",
-            default: "/openclaw-weixin/messages",
+            default: DEFAULT_WEBHOOK_PATH,
             secret: false,
             required: false,
         },
@@ -76,8 +108,24 @@ fn default_enabled() -> bool {
     true
 }
 
+fn default_base_url() -> String {
+    DEFAULT_BASE_URL.to_string()
+}
+
 fn default_webhook_path() -> String {
-    "/openclaw-weixin/messages".to_string()
+    DEFAULT_WEBHOOK_PATH.to_string()
+}
+
+fn default_weixin_mode() -> WeixinMode {
+    WeixinMode::Auto
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WeixinMode {
+    Auto,
+    Native,
+    Bridge,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +140,10 @@ pub struct WeixinAccountConfig {
     pub bot_username: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub mode: Option<WeixinMode>,
+    #[serde(default)]
+    pub base_url: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -108,10 +160,88 @@ pub struct WeixinChannelConfig {
     pub webhook_token: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default = "default_weixin_mode")]
+    pub mode: WeixinMode,
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
     #[serde(default)]
     pub accounts: HashMap<String, WeixinAccountConfig>,
     #[serde(default)]
     pub default_account: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum FlexibleId {
+    String(String),
+    Integer(i64),
+    Unsigned(u64),
+}
+
+impl FlexibleId {
+    fn as_string(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Integer(value) => value.to_string(),
+            Self::Unsigned(value) => value.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWebhookTextItem {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWebhookVoiceItem {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWebhookFileItem {
+    #[serde(default)]
+    file_name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWebhookRefMessage {
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWebhookMessageItem {
+    #[serde(default)]
+    r#type: i32,
+    #[serde(default)]
+    text_item: Option<WeixinWebhookTextItem>,
+    #[serde(default)]
+    voice_item: Option<WeixinWebhookVoiceItem>,
+    #[serde(default)]
+    file_item: Option<WeixinWebhookFileItem>,
+    #[serde(default)]
+    ref_msg: Option<WeixinWebhookRefMessage>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWireMessage {
+    #[serde(default)]
+    from_user_id: String,
+    #[serde(default)]
+    message_id: Option<FlexibleId>,
+    #[serde(default)]
+    create_time_ms: Option<i64>,
+    #[serde(default)]
+    context_token: String,
+    #[serde(default)]
+    item_list: Vec<WeixinWebhookMessageItem>,
+    #[serde(default)]
+    message_type: Option<i32>,
+    #[serde(default)]
+    message_state: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,69 +263,64 @@ struct WeixinWebhookPayload {
     #[serde(default)]
     item_list: Vec<WeixinWebhookMessageItem>,
     #[serde(default)]
-    message: Option<WeixinWebhookMessage>,
+    message: Option<WeixinWireMessage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum FlexibleId {
-    String(String),
-    Integer(i64),
-    Unsigned(u64),
+struct QrCodeResponse {
+    qrcode: String,
+    qrcode_img_content: String,
 }
 
-impl FlexibleId {
-    fn as_string(&self) -> String {
-        match self {
-            Self::String(value) => value.clone(),
-            Self::Integer(value) => value.to_string(),
-            Self::Unsigned(value) => value.to_string(),
-        }
-    }
+#[derive(Debug, Clone, Deserialize)]
+struct QrStatusResponse {
+    status: String,
+    #[serde(default)]
+    bot_token: String,
+    #[serde(default)]
+    ilink_bot_id: String,
+    #[serde(default)]
+    baseurl: String,
+    #[serde(default)]
+    ilink_user_id: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WeixinWebhookTextItem {
+#[derive(Debug, Clone, Deserialize)]
+struct WeixinGetUpdatesResp {
     #[serde(default)]
-    text: String,
+    ret: i64,
+    #[serde(default)]
+    errcode: Option<i64>,
+    #[serde(default)]
+    errmsg: Option<String>,
+    #[serde(default)]
+    msgs: Vec<WeixinWireMessage>,
+    #[serde(default)]
+    get_updates_buf: String,
+    #[serde(default)]
+    longpolling_timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WeixinWebhookVoiceItem {
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StoredWeixinAccount {
     #[serde(default)]
-    text: String,
+    token: String,
+    #[serde(default = "default_base_url")]
+    base_url: String,
+    #[serde(default)]
+    remote_account_id: String,
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    saved_at: String,
+    #[serde(default)]
+    context_tokens: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WeixinWebhookFileItem {
-    #[serde(default)]
-    file_name: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WeixinWebhookMessageItem {
-    #[serde(default)]
-    r#type: i32,
-    #[serde(default)]
-    text_item: Option<WeixinWebhookTextItem>,
-    #[serde(default)]
-    voice_item: Option<WeixinWebhookVoiceItem>,
-    #[serde(default)]
-    file_item: Option<WeixinWebhookFileItem>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WeixinWebhookMessage {
-    #[serde(default)]
-    from_user_id: String,
-    #[serde(default)]
-    message_id: Option<FlexibleId>,
-    #[serde(default)]
-    create_time_ms: Option<i64>,
-    #[serde(default)]
-    context_token: String,
-    #[serde(default)]
-    item_list: Vec<WeixinWebhookMessageItem>,
+#[derive(Debug, Clone)]
+struct NativeWeixinAccount {
+    token: String,
+    base_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -212,11 +337,15 @@ struct NormalizedWeixinInbound {
 pub struct WeixinRuntimeContext {
     pub channel_name: String,
     pub account_id: String,
+    pub local_account_key: String,
     pub send_command: String,
     pub allowed_user_ids: Vec<String>,
     pub webhook_token: String,
     pub bot_username: String,
     pub model: Option<String>,
+    pub mode: WeixinMode,
+    pub base_url: String,
+    pub state_root: PathBuf,
 }
 
 static WEIXIN_CONTEXT_TOKENS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -242,12 +371,20 @@ fn cache_context_token(channel_name: &str, external_chat_id: &str, context_token
     }
 }
 
-fn get_context_token(channel_name: &str, external_chat_id: &str) -> Option<String> {
+fn get_cached_context_token(channel_name: &str, external_chat_id: &str) -> Option<String> {
     context_token_registry().lock().ok().and_then(|guard| {
         guard
             .get(&context_token_key(channel_name, external_chat_id))
             .cloned()
     })
+}
+
+fn parse_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn pick_default_account_id(
@@ -269,21 +406,368 @@ fn pick_default_account_id(
     keys.first().cloned()
 }
 
-fn parse_csv(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+fn local_account_key(account_id: &str) -> String {
+    let trimmed = account_id.trim();
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sanitize_account_key(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "default".to_string()
+    } else {
+        out
+    }
+}
+
+fn weixin_state_root(data_root: &Path) -> PathBuf {
+    data_root.join(CHANNEL_KEY)
+}
+
+fn account_file_path(state_root: &Path, local_account_key: &str) -> PathBuf {
+    state_root
+        .join("accounts")
+        .join(format!("{}.json", sanitize_account_key(local_account_key)))
+}
+
+fn sync_buf_file_path(state_root: &Path, local_account_key: &str) -> PathBuf {
+    state_root
+        .join("sync")
+        .join(format!("{}.txt", sanitize_account_key(local_account_key)))
+}
+
+fn resolve_context_token_from_store(
+    state_root: &Path,
+    local_account_key: &str,
+    channel_name: &str,
+    external_chat_id: &str,
+) -> Option<String> {
+    if let Some(token) = get_cached_context_token(channel_name, external_chat_id) {
+        return Some(token);
+    }
+    let account = load_account_data(state_root, local_account_key)?;
+    let token = account
+        .context_tokens
+        .get(external_chat_id)
+        .cloned()
+        .filter(|token| !token.trim().is_empty())?;
+    cache_context_token(channel_name, external_chat_id, &token);
+    Some(token)
+}
+
+fn hydrate_context_token_cache(runtime: &WeixinRuntimeContext) {
+    let Some(account) = load_account_data(&runtime.state_root, &runtime.local_account_key) else {
+        return;
+    };
+    for (external_chat_id, token) in account.context_tokens {
+        cache_context_token(&runtime.channel_name, &external_chat_id, &token);
+    }
+}
+
+fn persist_context_token(
+    runtime: &WeixinRuntimeContext,
+    external_chat_id: &str,
+    context_token: &str,
+) -> Result<(), String> {
+    let token = context_token.trim();
+    if token.is_empty() {
+        return Ok(());
+    }
+    cache_context_token(&runtime.channel_name, external_chat_id, token);
+
+    let mut account = load_account_data(&runtime.state_root, &runtime.local_account_key)
+        .unwrap_or_else(|| StoredWeixinAccount {
+            base_url: runtime.base_url.clone(),
+            ..StoredWeixinAccount::default()
+        });
+    account
+        .context_tokens
+        .insert(external_chat_id.to_string(), token.to_string());
+    if account.base_url.trim().is_empty() {
+        account.base_url = runtime.base_url.clone();
+    }
+    save_account_data(&runtime.state_root, &runtime.local_account_key, &account)
+}
+
+fn load_account_data(state_root: &Path, local_account_key: &str) -> Option<StoredWeixinAccount> {
+    let path = account_file_path(state_root, local_account_key);
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn save_account_data(
+    state_root: &Path,
+    local_account_key: &str,
+    account: &StoredWeixinAccount,
+) -> Result<(), String> {
+    let path = account_file_path(state_root, local_account_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create Weixin account dir: {e}"))?;
+    }
+    let raw = serde_json::to_string_pretty(account)
+        .map_err(|e| format!("Failed to serialize Weixin account state: {e}"))?;
+    std::fs::write(&path, raw).map_err(|e| format!("Failed to write Weixin account state: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn delete_account_data(state_root: &Path, local_account_key: &str) -> Result<(), String> {
+    let path = account_file_path(state_root, local_account_key);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to remove Weixin account state: {e}"))?;
+    }
+    let sync_path = sync_buf_file_path(state_root, local_account_key);
+    if sync_path.exists() {
+        std::fs::remove_file(&sync_path)
+            .map_err(|e| format!("Failed to remove Weixin sync state: {e}"))?;
+    }
+    Ok(())
+}
+
+fn load_sync_buf(state_root: &Path, local_account_key: &str) -> String {
+    std::fs::read_to_string(sync_buf_file_path(state_root, local_account_key)).unwrap_or_default()
+}
+
+fn save_sync_buf(
+    state_root: &Path,
+    local_account_key: &str,
+    get_updates_buf: &str,
+) -> Result<(), String> {
+    let path = sync_buf_file_path(state_root, local_account_key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create Weixin sync dir: {e}"))?;
+    }
+    std::fs::write(path, get_updates_buf)
+        .map_err(|e| format!("Failed to write Weixin sync buf: {e}"))
+}
+
+fn stored_account_exists(state_root: &Path, local_account_key: &str) -> bool {
+    account_file_path(state_root, local_account_key).exists()
+}
+
+fn ensure_trailing_slash(base_url: &str) -> String {
+    if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    }
+}
+
+fn build_post_headers(token: Option<&str>, body: Option<&str>) -> Vec<(String, String)> {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    let wechat_uin = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let mut headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        (
+            "AuthorizationType".to_string(),
+            "ilink_bot_token".to_string(),
+        ),
+        (
+            "X-WECHAT-UIN".to_string(),
+            base64::engine::general_purpose::STANDARD.encode(wechat_uin.to_string()),
+        ),
+    ];
+    if let Some(body) = body {
+        headers.push(("Content-Length".to_string(), body.len().to_string()));
+    }
+    if let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) {
+        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+    }
+    headers
+}
+
+async fn api_post(
+    client: &reqwest::Client,
+    base_url: &str,
+    endpoint: &str,
+    body: String,
+    token: Option<&str>,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let url = format!("{}{}", ensure_trailing_slash(base_url), endpoint);
+    let mut request = client.post(url).timeout(Duration::from_millis(timeout_ms));
+    for (key, value) in build_post_headers(token, Some(&body)) {
+        request = request.header(&key, value);
+    }
+    let response = request
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("Weixin request failed: {e}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed reading Weixin response: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("Weixin HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
+}
+
+async fn api_get(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(&str, &str)],
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let mut request = client.get(url).timeout(Duration::from_millis(timeout_ms));
+    for (key, value) in headers {
+        request = request.header(*key, *value);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Weixin GET request failed: {e}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed reading Weixin GET response: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("Weixin HTTP {}: {}", status.as_u16(), text));
+    }
+    Ok(text)
+}
+
+async fn fetch_qrcode(client: &reqwest::Client, base_url: &str) -> Result<QrCodeResponse, String> {
+    let url = format!(
+        "{}ilink/bot/get_bot_qrcode?bot_type={}",
+        ensure_trailing_slash(base_url),
+        BOT_TYPE
+    );
+    let raw = api_get(client, &url, &[], DEFAULT_API_TIMEOUT_MS).await?;
+    serde_json::from_str(&raw).map_err(|e| format!("Failed to parse QR response: {e}"))
+}
+
+async fn poll_qr_status(
+    client: &reqwest::Client,
+    base_url: &str,
+    qrcode: &str,
+) -> Result<QrStatusResponse, String> {
+    let url = format!(
+        "{}ilink/bot/get_qrcode_status?qrcode={}",
+        ensure_trailing_slash(base_url),
+        urlencoding::encode(qrcode)
+    );
+    api_get(
+        client,
+        &url,
+        &[("iLink-App-ClientVersion", "1")],
+        QR_POLL_TIMEOUT_MS,
+    )
+    .await
+    .and_then(|raw| {
+        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse QR status response: {e}"))
+    })
+}
+
+async fn get_updates(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    get_updates_buf: &str,
+    timeout_ms: u64,
+) -> Result<WeixinGetUpdatesResp, String> {
+    let body = serde_json::json!({
+        "get_updates_buf": get_updates_buf,
+        "base_info": {
+            "channel_version": env!("CARGO_PKG_VERSION")
+        }
+    })
+    .to_string();
+    let raw = api_post(
+        client,
+        &account.base_url,
+        "ilink/bot/getupdates",
+        body,
+        Some(&account.token),
+        timeout_ms,
+    )
+    .await?;
+    serde_json::from_str(&raw).map_err(|e| format!("Failed to parse getupdates response: {e}"))
+}
+
+fn generate_client_id() -> String {
+    format!("microclaw-weixin:{}", uuid::Uuid::new_v4())
+}
+
+async fn send_text_message_native(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    to_user_id: &str,
+    text: &str,
+    context_token: &str,
+) -> Result<String, String> {
+    let client_id = generate_client_id();
+    let body = serde_json::json!({
+        "msg": {
+            "from_user_id": "",
+            "to_user_id": to_user_id,
+            "client_id": client_id,
+            "message_type": MSG_TYPE_BOT,
+            "message_state": MSG_STATE_FINISH,
+            "item_list": [
+                {
+                    "type": MSG_ITEM_TEXT,
+                    "text_item": { "text": text }
+                }
+            ],
+            "context_token": context_token,
+        },
+        "base_info": {
+            "channel_version": env!("CARGO_PKG_VERSION")
+        }
+    })
+    .to_string();
+    let _ = api_post(
+        client,
+        &account.base_url,
+        "ilink/bot/sendmessage",
+        body,
+        Some(&account.token),
+        DEFAULT_API_TIMEOUT_MS,
+    )
+    .await?;
+    Ok(client_id)
 }
 
 fn summarize_weixin_item(item: &WeixinWebhookMessageItem) -> Option<String> {
     match item.r#type {
-        1 => item
-            .text_item
-            .as_ref()
-            .map(|text| text.text.trim().to_string())
-            .filter(|text| !text.is_empty()),
+        1 => {
+            let text = item
+                .text_item
+                .as_ref()
+                .map(|text| text.text.trim().to_string())
+                .filter(|text| !text.is_empty())?;
+            if let Some(reference) = item
+                .ref_msg
+                .as_ref()
+                .map(|reference| reference.title.trim().to_string())
+                .filter(|title| !title.is_empty())
+            {
+                return Some(format!("[引用: {reference}]\n{text}"));
+            }
+            Some(text)
+        }
         2 => Some("[image]".to_string()),
         3 => item
             .voice_item
@@ -309,6 +793,25 @@ fn summarize_weixin_items(items: &[WeixinWebhookMessageItem]) -> String {
         .filter_map(summarize_weixin_item)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+trait EmptyStringFallback {
+    fn if_empty_then<F>(self, fallback: F) -> Option<String>
+    where
+        F: FnOnce() -> Option<String>;
+}
+
+impl EmptyStringFallback for String {
+    fn if_empty_then<F>(self, fallback: F) -> Option<String>
+    where
+        F: FnOnce() -> Option<String>,
+    {
+        if self.trim().is_empty() {
+            fallback()
+        } else {
+            Some(self)
+        }
+    }
 }
 
 fn normalize_weixin_inbound(payload: &WeixinWebhookPayload) -> Option<NormalizedWeixinInbound> {
@@ -362,6 +865,32 @@ fn normalize_weixin_inbound(payload: &WeixinWebhookPayload) -> Option<Normalized
     })
 }
 
+fn normalize_polled_message(message: &WeixinWireMessage) -> Option<NormalizedWeixinInbound> {
+    if message.message_type != Some(MSG_TYPE_USER) {
+        return None;
+    }
+    let sender = message.from_user_id.trim();
+    if sender.is_empty() {
+        return None;
+    }
+    let text = summarize_weixin_items(&message.item_list);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(NormalizedWeixinInbound {
+        sender: sender.to_string(),
+        text,
+        message_id: message
+            .message_id
+            .as_ref()
+            .map(FlexibleId::as_string)
+            .unwrap_or_default(),
+        timestamp_ms: message.create_time_ms,
+        timestamp: None,
+        context_token: message.context_token.trim().to_string(),
+    })
+}
+
 fn provided_weixin_webhook_token(headers: &HeaderMap) -> String {
     if let Some(token) = headers
         .get("x-openclaw-weixin-webhook-token")
@@ -381,26 +910,12 @@ fn provided_weixin_webhook_token(headers: &HeaderMap) -> String {
         .to_string()
 }
 
-trait EmptyStringFallback {
-    fn if_empty_then<F>(self, fallback: F) -> Option<String>
-    where
-        F: FnOnce() -> Option<String>;
-}
-
-impl EmptyStringFallback for String {
-    fn if_empty_then<F>(self, fallback: F) -> Option<String>
-    where
-        F: FnOnce() -> Option<String>,
-    {
-        if self.trim().is_empty() {
-            fallback()
-        } else {
-            Some(self)
-        }
-    }
+fn state_root_for_runtime_config(config: &Config) -> PathBuf {
+    weixin_state_root(&config.data_root_dir())
 }
 
 pub fn build_weixin_runtime_contexts(config: &crate::config::Config) -> Vec<WeixinRuntimeContext> {
+    let state_root = state_root_for_runtime_config(config);
     let Some(wx_cfg) = config.channel_config::<WeixinChannelConfig>(CHANNEL_KEY) else {
         return Vec::new();
     };
@@ -447,14 +962,28 @@ pub fn build_weixin_runtime_contexts(config: &crate::config::Config) -> Vec<Weix
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(ToOwned::to_owned);
+        let mode = account_cfg.mode.unwrap_or(wx_cfg.mode);
+        let base_url = if account_cfg.base_url.trim().is_empty() {
+            wx_cfg.base_url.trim().to_string()
+        } else {
+            account_cfg.base_url.trim().to_string()
+        };
         runtimes.push(WeixinRuntimeContext {
             channel_name,
-            account_id,
+            account_id: account_id.clone(),
+            local_account_key: local_account_key(&account_id),
             send_command,
             allowed_user_ids: parse_csv(&account_cfg.allowed_user_ids),
             webhook_token,
             bot_username,
             model,
+            mode,
+            base_url: if base_url.is_empty() {
+                DEFAULT_BASE_URL.to_string()
+            } else {
+                base_url
+            },
+            state_root: state_root.clone(),
         });
     }
 
@@ -462,6 +991,7 @@ pub fn build_weixin_runtime_contexts(config: &crate::config::Config) -> Vec<Weix
         runtimes.push(WeixinRuntimeContext {
             channel_name: CHANNEL_KEY.to_string(),
             account_id: String::new(),
+            local_account_key: local_account_key(""),
             send_command: wx_cfg.send_command.trim().to_string(),
             allowed_user_ids: parse_csv(&wx_cfg.allowed_user_ids),
             webhook_token: wx_cfg.webhook_token.trim().to_string(),
@@ -472,6 +1002,13 @@ pub fn build_weixin_runtime_contexts(config: &crate::config::Config) -> Vec<Weix
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(ToOwned::to_owned),
+            mode: wx_cfg.mode,
+            base_url: if wx_cfg.base_url.trim().is_empty() {
+                DEFAULT_BASE_URL.to_string()
+            } else {
+                wx_cfg.base_url.trim().to_string()
+            },
+            state_root,
         });
     }
 
@@ -505,19 +1042,138 @@ fn select_runtime_context(
         .or_else(|| runtimes.first().cloned())
 }
 
+fn build_default_runtime_context(
+    config: &Config,
+    account_id: Option<&str>,
+) -> WeixinRuntimeContext {
+    let configured_account = account_id.unwrap_or("").trim();
+    let is_default = configured_account.is_empty();
+    let channel_name = if is_default {
+        CHANNEL_KEY.to_string()
+    } else {
+        format!("{CHANNEL_KEY}.{configured_account}")
+    };
+    let account_id = configured_account.to_string();
+    WeixinRuntimeContext {
+        channel_name,
+        local_account_key: local_account_key(&account_id),
+        account_id,
+        send_command: String::new(),
+        allowed_user_ids: Vec::new(),
+        webhook_token: String::new(),
+        bot_username: config.bot_username_for_channel(CHANNEL_KEY),
+        model: None,
+        mode: WeixinMode::Native,
+        base_url: DEFAULT_BASE_URL.to_string(),
+        state_root: weixin_state_root(Path::new(&config.runtime_data_dir())),
+    }
+}
+
+fn resolve_weixin_runtime_for_cli(
+    config: &Config,
+    account_id: Option<&str>,
+    base_url_override: Option<&str>,
+) -> Result<WeixinRuntimeContext, String> {
+    let mut runtime = if let Some(runtime) = select_runtime_context(
+        &build_weixin_runtime_contexts(config),
+        account_id.unwrap_or(""),
+    ) {
+        runtime
+    } else {
+        build_default_runtime_context(config, account_id)
+    };
+    if let Some(base_url) = base_url_override
+        .map(str::trim)
+        .filter(|base_url| !base_url.is_empty())
+    {
+        runtime.base_url = base_url.to_string();
+    }
+    Ok(runtime)
+}
+
+fn runtime_should_native_poll(runtime: &WeixinRuntimeContext) -> bool {
+    match runtime.mode {
+        WeixinMode::Bridge => false,
+        WeixinMode::Native => true,
+        WeixinMode::Auto => {
+            runtime.send_command.trim().is_empty()
+                || stored_account_exists(&runtime.state_root, &runtime.local_account_key)
+        }
+    }
+}
+
 pub struct WeixinAdapter {
     name: String,
-    account_id: String,
+    local_account_key: String,
     send_command: String,
+    mode: WeixinMode,
+    base_url: String,
+    state_root: PathBuf,
+    http_client: reqwest::Client,
 }
 
 impl WeixinAdapter {
-    pub fn new(name: String, account_id: String, send_command: String) -> Self {
+    pub fn from_runtime(runtime: &WeixinRuntimeContext) -> Self {
         Self {
-            name,
-            account_id,
-            send_command,
+            name: runtime.channel_name.clone(),
+            local_account_key: runtime.local_account_key.clone(),
+            send_command: runtime.send_command.clone(),
+            mode: runtime.mode,
+            base_url: runtime.base_url.clone(),
+            state_root: runtime.state_root.clone(),
+            http_client: reqwest::Client::new(),
         }
+    }
+
+    fn should_use_native(&self) -> bool {
+        match self.mode {
+            WeixinMode::Bridge => false,
+            WeixinMode::Native => true,
+            WeixinMode::Auto => {
+                self.send_command.trim().is_empty()
+                    || stored_account_exists(&self.state_root, &self.local_account_key)
+            }
+        }
+    }
+
+    fn resolve_context_token(&self, external_chat_id: &str) -> Option<String> {
+        resolve_context_token_from_store(
+            &self.state_root,
+            &self.local_account_key,
+            &self.name,
+            external_chat_id,
+        )
+    }
+
+    fn load_native_account(&self) -> Result<NativeWeixinAccount, String> {
+        let stored =
+            load_account_data(&self.state_root, &self.local_account_key).ok_or_else(|| {
+                format!(
+                    "No Weixin credentials found for '{}'. Run `microclaw weixin login{}` first.",
+                    self.name,
+                    if self.local_account_key == "default" {
+                        "".to_string()
+                    } else {
+                        format!(" --account {}", self.local_account_key)
+                    }
+                )
+            })?;
+        let token = stored.token.trim();
+        if token.is_empty() {
+            return Err(format!(
+                "Stored Weixin credentials for '{}' are incomplete. Run login again.",
+                self.name
+            ));
+        }
+        let base_url = if stored.base_url.trim().is_empty() {
+            self.base_url.clone()
+        } else {
+            stored.base_url.trim().to_string()
+        };
+        Ok(NativeWeixinAccount {
+            token: token.to_string(),
+            base_url,
+        })
     }
 
     fn run_send_command(
@@ -530,7 +1186,7 @@ impl WeixinAdapter {
         if self.send_command.trim().is_empty() {
             return Err("openclaw-weixin.send_command is empty".to_string());
         }
-        let context_token = get_context_token(&self.name, external_chat_id).ok_or_else(|| {
+        let context_token = self.resolve_context_token(external_chat_id).ok_or_else(|| {
             format!(
                 "openclaw-weixin requires a cached context_token for target '{}'; wait for an inbound message before replying",
                 external_chat_id
@@ -549,7 +1205,7 @@ impl WeixinAdapter {
         let payload = serde_json::json!({
             "action": action,
             "channel_name": self.name,
-            "account_id": self.account_id,
+            "account_id": self.local_account_key,
             "target": external_chat_id,
             "text": text,
             "context_token": context_token,
@@ -563,7 +1219,7 @@ impl WeixinAdapter {
             .arg(self.send_command.trim())
             .env("MICROCLAW_WEIXIN_ACTION", action)
             .env("MICROCLAW_WEIXIN_CHANNEL_NAME", &self.name)
-            .env("MICROCLAW_WEIXIN_ACCOUNT_ID", &self.account_id)
+            .env("MICROCLAW_WEIXIN_ACCOUNT_ID", &self.local_account_key)
             .env("MICROCLAW_WEIXIN_TARGET", external_chat_id)
             .env("MICROCLAW_WEIXIN_TEXT", text)
             .env("MICROCLAW_WEIXIN_CONTEXT_TOKEN", &context_token)
@@ -593,8 +1249,27 @@ impl ChannelAdapter for WeixinAdapter {
     }
 
     async fn send_text(&self, external_chat_id: &str, text: &str) -> Result<(), String> {
-        self.run_send_command(external_chat_id, text, None, None)
+        if self.should_use_native() {
+            let context_token = self.resolve_context_token(external_chat_id).ok_or_else(|| {
+                format!(
+                    "openclaw-weixin requires a cached context_token for target '{}'; wait for an inbound message before replying",
+                    external_chat_id
+                )
+            })?;
+            let account = self.load_native_account()?;
+            send_text_message_native(
+                &self.http_client,
+                &account,
+                external_chat_id,
+                text,
+                &context_token,
+            )
+            .await
             .map(|_| ())
+        } else {
+            self.run_send_command(external_chat_id, text, None, None)
+                .map(|_| ())
+        }
     }
 
     async fn send_attachment(
@@ -603,16 +1278,317 @@ impl ChannelAdapter for WeixinAdapter {
         file_path: &Path,
         caption: Option<&str>,
     ) -> Result<String, String> {
+        if self.send_command.trim().is_empty() {
+            return Err(
+                "OpenClaw Weixin native mode currently supports text only; configure send_command for attachment delivery."
+                    .to_string(),
+            );
+        }
         self.run_send_command(external_chat_id, "", Some(file_path), caption)
     }
 }
 
-pub async fn start_weixin_bot(_app_state: Arc<AppState>, runtime: WeixinRuntimeContext) {
+async fn process_weixin_inbound_message(
+    app_state: Arc<AppState>,
+    runtime_ctx: WeixinRuntimeContext,
+    normalized: NormalizedWeixinInbound,
+) {
+    let sender = normalized.sender.trim();
+    let text = normalized.text.trim();
+    if sender.is_empty() || text.is_empty() {
+        return;
+    }
+    if !runtime_ctx.allowed_user_ids.is_empty()
+        && !runtime_ctx.allowed_user_ids.iter().any(|id| id == sender)
+    {
+        return;
+    }
+
+    if let Err(err) = persist_context_token(&runtime_ctx, sender, &normalized.context_token) {
+        warn!(
+            "OpenClaw Weixin: failed to persist context token for {}: {}",
+            sender, err
+        );
+    }
+
+    let external_chat_id = sender.to_string();
+    let chat_id = call_blocking(app_state.db.clone(), {
+        let channel_name = runtime_ctx.channel_name.clone();
+        let title = format!("openclaw-weixin-{external_chat_id}");
+        let external_chat_id = external_chat_id.clone();
+        move |db| {
+            db.resolve_or_create_chat_id(
+                &channel_name,
+                &external_chat_id,
+                Some(&title),
+                "weixin_dm",
+            )
+        }
+    })
+    .await
+    .unwrap_or(0);
+    if chat_id == 0 {
+        error!(
+            "OpenClaw Weixin: failed to resolve chat id for {}",
+            external_chat_id
+        );
+        return;
+    }
+
+    let inbound_message_id = if normalized.message_id.trim().is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        normalized.message_id.clone()
+    };
+    let inbound_ts_ms = normalized.timestamp_ms.or_else(|| {
+        normalized
+            .timestamp
+            .as_deref()
+            .and_then(parse_epoch_ms_from_str)
+            .or_else(|| {
+                normalized
+                    .timestamp
+                    .as_deref()
+                    .and_then(parse_epoch_ms_from_seconds_str)
+            })
+    });
+    if should_drop_pre_start_message(
+        &runtime_ctx.channel_name,
+        &inbound_message_id,
+        inbound_ts_ms,
+    ) {
+        return;
+    }
+    if should_drop_recent_duplicate_message(&runtime_ctx.channel_name, &inbound_message_id) {
+        return;
+    }
+
+    if is_slash_command(text) {
+        let adapter = WeixinAdapter::from_runtime(&runtime_ctx);
+        if let Some(reply) = handle_chat_command(
+            &app_state,
+            chat_id,
+            &runtime_ctx.channel_name,
+            text,
+            Some(sender),
+        )
+        .await
+        {
+            let _ = adapter.send_text(sender, &reply).await;
+            return;
+        }
+        let _ = adapter.send_text(sender, &unknown_command_response()).await;
+        return;
+    }
+
+    let stored = StoredMessage {
+        id: inbound_message_id.clone(),
+        chat_id,
+        sender_name: sender.to_string(),
+        content: text.to_string(),
+        is_from_bot: false,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let inserted = call_blocking(app_state.db.clone(), move |db| {
+        db.store_message_if_new(&stored)
+    })
+    .await
+    .unwrap_or(false);
+    if !inserted {
+        info!(
+            "OpenClaw Weixin: skipping duplicate message chat_id={} message_id={}",
+            chat_id, inbound_message_id
+        );
+        return;
+    }
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    match process_with_agent_with_events(
+        &app_state,
+        AgentRequestContext {
+            caller_channel: &runtime_ctx.channel_name,
+            chat_id,
+            chat_type: "private",
+        },
+        None,
+        None,
+        Some(&event_tx),
+    )
+    .await
+    {
+        Ok(response) => {
+            drop(event_tx);
+            let mut used_send_message_tool = false;
+            while let Some(event) = event_rx.recv().await {
+                if let AgentEvent::ToolStart { name, .. } = event {
+                    if name == "send_message" {
+                        used_send_message_tool = true;
+                    }
+                }
+            }
+            let adapter = WeixinAdapter::from_runtime(&runtime_ctx);
+            if used_send_message_tool {
+                if !response.is_empty() {
+                    info!(
+                        "OpenClaw Weixin: suppressing final response for chat {} because send_message already delivered output",
+                        chat_id
+                    );
+                }
+            } else if !response.is_empty() {
+                if let Err(e) = adapter.send_text(sender, &response).await {
+                    error!("OpenClaw Weixin: failed to send response: {e}");
+                }
+                let bot_msg = StoredMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    chat_id,
+                    sender_name: runtime_ctx.bot_username.clone(),
+                    content: response,
+                    is_from_bot: true,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+                let _ =
+                    call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg)).await;
+            } else {
+                let _ = adapter
+                    .send_text(
+                        sender,
+                        "I couldn't produce a visible reply after an automatic retry. Please try again.",
+                    )
+                    .await;
+            }
+        }
+        Err(e) => {
+            error!("OpenClaw Weixin: error processing message: {e}");
+        }
+    }
+}
+
+async fn start_native_poll_loop(
+    app_state: Arc<AppState>,
+    runtime: WeixinRuntimeContext,
+    account: NativeWeixinAccount,
+) {
+    let client = reqwest::Client::new();
+    let mut get_updates_buf = load_sync_buf(&runtime.state_root, &runtime.local_account_key);
+    let mut next_timeout_ms = LONG_POLL_TIMEOUT_MS;
+    let mut consecutive_failures = 0usize;
+
+    hydrate_context_token_cache(&runtime);
+    info!(
+        "OpenClaw Weixin native polling started for '{}' (account_key={}, base_url={})",
+        runtime.channel_name, runtime.local_account_key, account.base_url
+    );
+
+    loop {
+        match get_updates(&client, &account, &get_updates_buf, next_timeout_ms).await {
+            Ok(response) => {
+                let errcode = response.errcode.unwrap_or(0);
+                if response.ret != 0 || errcode != 0 {
+                    if response.ret == SESSION_EXPIRED_ERRCODE || errcode == SESSION_EXPIRED_ERRCODE
+                    {
+                        error!(
+                            "OpenClaw Weixin session expired for '{}'; run `microclaw weixin login{}` again",
+                            runtime.channel_name,
+                            if runtime.local_account_key == "default" {
+                                "".to_string()
+                            } else {
+                                format!(" --account {}", runtime.local_account_key)
+                            }
+                        );
+                        tokio::time::sleep(Duration::from_millis(BACKOFF_DELAY_MS)).await;
+                        continue;
+                    }
+                    consecutive_failures += 1;
+                    warn!(
+                        "OpenClaw Weixin getupdates failed for '{}': ret={} errcode={} errmsg={}",
+                        runtime.channel_name,
+                        response.ret,
+                        errcode,
+                        response.errmsg.unwrap_or_default()
+                    );
+                    let sleep_ms = if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        consecutive_failures = 0;
+                        BACKOFF_DELAY_MS
+                    } else {
+                        RETRY_DELAY_MS
+                    };
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    continue;
+                }
+
+                consecutive_failures = 0;
+                if !response.get_updates_buf.is_empty() {
+                    get_updates_buf = response.get_updates_buf.clone();
+                    if let Err(err) = save_sync_buf(
+                        &runtime.state_root,
+                        &runtime.local_account_key,
+                        &get_updates_buf,
+                    ) {
+                        warn!("OpenClaw Weixin: failed to save sync buf: {err}");
+                    }
+                }
+                if let Some(timeout_ms) = response
+                    .longpolling_timeout_ms
+                    .filter(|timeout_ms| *timeout_ms > 0)
+                {
+                    next_timeout_ms = timeout_ms;
+                }
+                for message in response.msgs {
+                    if let Some(normalized) = normalize_polled_message(&message) {
+                        process_weixin_inbound_message(
+                            app_state.clone(),
+                            runtime.clone(),
+                            normalized,
+                        )
+                        .await;
+                    }
+                }
+            }
+            Err(err) => {
+                consecutive_failures += 1;
+                warn!(
+                    "OpenClaw Weixin polling error for '{}': {}",
+                    runtime.channel_name, err
+                );
+                let sleep_ms = if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    consecutive_failures = 0;
+                    BACKOFF_DELAY_MS
+                } else {
+                    RETRY_DELAY_MS
+                };
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
+}
+
+pub async fn start_weixin_bot(app_state: Arc<AppState>, runtime: WeixinRuntimeContext) {
     mark_channel_started(&runtime.channel_name);
     info!(
         "OpenClaw Weixin adapter '{}' is ready",
         runtime.channel_name
     );
+
+    if !runtime_should_native_poll(&runtime) {
+        info!(
+            "OpenClaw Weixin '{}' running in bridge mode",
+            runtime.channel_name
+        );
+        return;
+    }
+
+    let adapter = WeixinAdapter::from_runtime(&runtime);
+    match adapter.load_native_account() {
+        Ok(account) => {
+            start_native_poll_loop(app_state, runtime, account).await;
+        }
+        Err(err) => {
+            warn!(
+                "OpenClaw Weixin '{}' native polling disabled: {}",
+                runtime.channel_name, err
+            );
+        }
+    }
 }
 
 pub fn register_weixin_webhook(router: Router, app_state: Arc<AppState>) -> Router {
@@ -660,201 +1636,180 @@ async fn weixin_webhook_handler(
     let Some(normalized) = normalize_weixin_inbound(&payload) else {
         return axum::http::StatusCode::BAD_REQUEST;
     };
-    let sender = normalized.sender.trim();
-    let text = normalized.text.trim();
-    if !runtime_ctx.allowed_user_ids.is_empty()
-        && !runtime_ctx.allowed_user_ids.iter().any(|id| id == sender)
-    {
-        return axum::http::StatusCode::FORBIDDEN;
-    }
-
-    cache_context_token(&runtime_ctx.channel_name, sender, &normalized.context_token);
-
-    let external_chat_id = sender.to_string();
-    let chat_id = call_blocking(app_state.db.clone(), {
-        let channel_name = runtime_ctx.channel_name.clone();
-        let title = format!("openclaw-weixin-{external_chat_id}");
-        let external_chat_id = external_chat_id.clone();
-        move |db| {
-            db.resolve_or_create_chat_id(
-                &channel_name,
-                &external_chat_id,
-                Some(&title),
-                "weixin_dm",
-            )
-        }
-    })
-    .await
-    .unwrap_or(0);
-    if chat_id == 0 {
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR;
-    }
-
-    let inbound_message_id = if normalized.message_id.trim().is_empty() {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        normalized.message_id.clone()
-    };
-    let inbound_ts_ms = normalized.timestamp_ms.or_else(|| {
-        normalized
-            .timestamp
-            .as_deref()
-            .and_then(parse_epoch_ms_from_str)
-            .or_else(|| {
-                normalized
-                    .timestamp
-                    .as_deref()
-                    .and_then(parse_epoch_ms_from_seconds_str)
-            })
-    });
-    if should_drop_pre_start_message(
-        &runtime_ctx.channel_name,
-        &inbound_message_id,
-        inbound_ts_ms,
-    ) {
-        return axum::http::StatusCode::OK;
-    }
-    if should_drop_recent_duplicate_message(&runtime_ctx.channel_name, &inbound_message_id) {
-        return axum::http::StatusCode::OK;
-    }
-
-    if is_slash_command(text) {
-        if let Some(reply) = handle_chat_command(
-            &app_state,
-            chat_id,
-            &runtime_ctx.channel_name,
-            text,
-            Some(sender),
-        )
-        .await
-        {
-            let adapter = WeixinAdapter::new(
-                runtime_ctx.channel_name.clone(),
-                runtime_ctx.account_id.clone(),
-                runtime_ctx.send_command.clone(),
-            );
-            let _ = adapter.send_text(sender, &reply).await;
-            return axum::http::StatusCode::OK;
-        }
-        let adapter = WeixinAdapter::new(
-            runtime_ctx.channel_name.clone(),
-            runtime_ctx.account_id.clone(),
-            runtime_ctx.send_command.clone(),
-        );
-        let _ = adapter.send_text(sender, &unknown_command_response()).await;
-        return axum::http::StatusCode::OK;
-    }
-
-    let stored = StoredMessage {
-        id: inbound_message_id.clone(),
-        chat_id,
-        sender_name: sender.to_string(),
-        content: text.to_string(),
-        is_from_bot: false,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    };
-    let inserted = call_blocking(app_state.db.clone(), move |db| {
-        db.store_message_if_new(&stored)
-    })
-    .await
-    .unwrap_or(false);
-    if !inserted {
-        info!(
-            "OpenClaw Weixin: skipping duplicate message chat_id={} message_id={}",
-            chat_id, inbound_message_id
-        );
-        return axum::http::StatusCode::OK;
-    }
-
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-    match process_with_agent_with_events(
-        &app_state,
-        AgentRequestContext {
-            caller_channel: &runtime_ctx.channel_name,
-            chat_id,
-            chat_type: "private",
-        },
-        None,
-        None,
-        Some(&event_tx),
-    )
-    .await
-    {
-        Ok(response) => {
-            drop(event_tx);
-            let mut used_send_message_tool = false;
-            while let Some(event) = event_rx.recv().await {
-                if let AgentEvent::ToolStart { name, .. } = event {
-                    if name == "send_message" {
-                        used_send_message_tool = true;
-                    }
-                }
-            }
-            let adapter = WeixinAdapter::new(
-                runtime_ctx.channel_name.clone(),
-                runtime_ctx.account_id.clone(),
-                runtime_ctx.send_command.clone(),
-            );
-            if used_send_message_tool {
-                if !response.is_empty() {
-                    info!(
-                        "OpenClaw Weixin: suppressing final response for chat {} because send_message already delivered output",
-                        chat_id
-                    );
-                }
-            } else if !response.is_empty() {
-                if let Err(e) = adapter.send_text(sender, &response).await {
-                    error!("OpenClaw Weixin: failed to send response: {e}");
-                }
-                let bot_msg = StoredMessage {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    chat_id,
-                    sender_name: runtime_ctx.bot_username.clone(),
-                    content: response,
-                    is_from_bot: true,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                };
-                let _ =
-                    call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg)).await;
-            } else {
-                let _ = adapter
-                    .send_text(
-                        sender,
-                        "I couldn't produce a visible reply after an automatic retry. Please try again.",
-                    )
-                    .await;
-            }
-        }
-        Err(e) => {
-            error!("OpenClaw Weixin: error processing message: {e}");
-        }
-    }
-
+    process_weixin_inbound_message(app_state, runtime_ctx, normalized).await;
     axum::http::StatusCode::OK
+}
+
+async fn do_qr_login(runtime: &WeixinRuntimeContext) -> Result<StoredWeixinAccount, String> {
+    let client = reqwest::Client::new();
+    let qr = fetch_qrcode(&client, &runtime.base_url).await?;
+    eprintln!();
+    eprintln!("使用微信扫描以下二维码完成连接：");
+    eprintln!();
+    eprintln!("{}", qr.qrcode_img_content);
+    eprintln!();
+    eprintln!(
+        "若终端无法直接显示二维码图片，请将上面的内容复制到浏览器打开，或用其他设备展示后再扫码。"
+    );
+    eprintln!();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(480);
+    let mut scanned_logged = false;
+    while std::time::Instant::now() < deadline {
+        let status = poll_qr_status(&client, &runtime.base_url, &qr.qrcode).await?;
+        match status.status.as_str() {
+            "wait" => {}
+            "scaned" => {
+                if !scanned_logged {
+                    eprintln!("已扫码，请在微信中确认。");
+                    scanned_logged = true;
+                }
+            }
+            "expired" => {
+                return Err("二维码已过期，请重新执行登录。".to_string());
+            }
+            "confirmed" => {
+                if status.bot_token.trim().is_empty() || status.ilink_bot_id.trim().is_empty() {
+                    return Err("登录确认后未返回完整 bot 凭据。".to_string());
+                }
+                return Ok(StoredWeixinAccount {
+                    token: status.bot_token.trim().to_string(),
+                    base_url: if status.baseurl.trim().is_empty() {
+                        runtime.base_url.clone()
+                    } else {
+                        status.baseurl.trim().to_string()
+                    },
+                    remote_account_id: status.ilink_bot_id.trim().to_string(),
+                    user_id: status.ilink_user_id.trim().to_string(),
+                    saved_at: chrono::Utc::now().to_rfc3339(),
+                    context_tokens: load_account_data(
+                        &runtime.state_root,
+                        &runtime.local_account_key,
+                    )
+                    .map(|stored| stored.context_tokens)
+                    .unwrap_or_default(),
+                });
+            }
+            other => {
+                warn!("Unexpected Weixin QR status '{}'", other);
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Err("登录超时。".to_string())
+}
+
+pub async fn login_via_cli(
+    config: &Config,
+    account_id: Option<&str>,
+    base_url_override: Option<&str>,
+) -> Result<String, String> {
+    let runtime = resolve_weixin_runtime_for_cli(config, account_id, base_url_override)?;
+    let account = do_qr_login(&runtime).await?;
+    save_account_data(&runtime.state_root, &runtime.local_account_key, &account)?;
+    let mut summary = String::new();
+    let _ = writeln!(
+        summary,
+        "OpenClaw Weixin login succeeded for '{}'.",
+        runtime.channel_name
+    );
+    let _ = writeln!(summary, "Local account key: {}", runtime.local_account_key);
+    let _ = writeln!(summary, "Remote account id: {}", account.remote_account_id);
+    let _ = writeln!(summary, "Base URL: {}", account.base_url);
+    if !account.user_id.trim().is_empty() {
+        let _ = writeln!(summary, "Linked user id: {}", account.user_id);
+    }
+    Ok(summary.trim().to_string())
+}
+
+pub fn status_via_cli(config: &Config, account_id: Option<&str>) -> Result<String, String> {
+    let runtime = resolve_weixin_runtime_for_cli(config, account_id, None)?;
+    let stored = load_account_data(&runtime.state_root, &runtime.local_account_key);
+    let sync_buf = load_sync_buf(&runtime.state_root, &runtime.local_account_key);
+    let mut out = String::new();
+    let _ = writeln!(out, "Channel: {}", runtime.channel_name);
+    let _ = writeln!(out, "Mode: {:?}", runtime.mode);
+    let _ = writeln!(out, "Base URL: {}", runtime.base_url);
+    let _ = writeln!(
+        out,
+        "Send command configured: {}",
+        !runtime.send_command.trim().is_empty()
+    );
+    let _ = writeln!(
+        out,
+        "Native polling active when started: {}",
+        runtime_should_native_poll(&runtime)
+    );
+    match stored {
+        Some(account) => {
+            let _ = writeln!(out, "Credentials: yes");
+            let _ = writeln!(
+                out,
+                "Remote account id: {}",
+                if account.remote_account_id.trim().is_empty() {
+                    "(unknown)"
+                } else {
+                    account.remote_account_id.trim()
+                }
+            );
+            let _ = writeln!(
+                out,
+                "Saved at: {}",
+                if account.saved_at.trim().is_empty() {
+                    "(unknown)"
+                } else {
+                    account.saved_at.trim()
+                }
+            );
+            let _ = writeln!(
+                out,
+                "Cached context tokens: {}",
+                account.context_tokens.len()
+            );
+        }
+        None => {
+            let _ = writeln!(out, "Credentials: no");
+        }
+    }
+    let _ = writeln!(out, "Sync buf bytes: {}", sync_buf.len());
+    Ok(out.trim().to_string())
+}
+
+pub fn logout_via_cli(config: &Config, account_id: Option<&str>) -> Result<String, String> {
+    let runtime = resolve_weixin_runtime_for_cli(config, account_id, None)?;
+    delete_account_data(&runtime.state_root, &runtime.local_account_key)?;
+    Ok(format!(
+        "Removed OpenClaw Weixin credentials for '{}'.",
+        runtime.channel_name
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use super::{
-        build_weixin_runtime_contexts, cache_context_token, normalize_weixin_inbound,
-        provided_weixin_webhook_token, select_runtime_context, FlexibleId, WeixinAdapter,
-        WeixinWebhookMessage, WeixinWebhookMessageItem, WeixinWebhookPayload,
-        WeixinWebhookTextItem, WeixinWebhookVoiceItem, CHANNEL_KEY,
-    };
+    use super::*;
     use crate::config::Config;
     use axum::http::{HeaderMap, HeaderValue};
     use microclaw_channels::channel_adapter::ChannelAdapter;
 
+    fn unique_temp_dir() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("mc_weixin_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
     #[test]
     fn test_build_weixin_runtime_contexts_with_default_account() {
-        let mut cfg = Config::test_defaults();
+        let mut cfg: Config = serde_yaml::from_str("{}").unwrap();
         cfg.bot_username = "assistant".to_string();
+        cfg.data_dir = unique_temp_dir().to_string_lossy().to_string();
         cfg.channels = serde_yaml::from_str(
             r#"
 openclaw-weixin:
   enabled: true
+  mode: native
+  base_url: https://example.invalid
   send_command: "root-send"
   default_account: ops
   accounts:
@@ -882,6 +1837,7 @@ openclaw-weixin:
         assert_eq!(default_runtime.send_command, "ops-send");
         assert_eq!(default_runtime.bot_username, "ops-bot");
         assert_eq!(default_runtime.model.as_deref(), Some("gpt-4.1"));
+        assert_eq!(default_runtime.mode, WeixinMode::Native);
 
         let secondary = runtimes
             .iter()
@@ -889,11 +1845,14 @@ openclaw-weixin:
             .unwrap();
         assert_eq!(secondary.account_id, "main");
         assert_eq!(secondary.allowed_user_ids, vec!["alice", "bob"]);
+
+        let _ = fs::remove_dir_all(cfg.data_dir);
     }
 
     #[test]
     fn test_select_runtime_context_uses_payload_account_id() {
-        let mut cfg = Config::test_defaults();
+        let mut cfg: Config = serde_yaml::from_str("{}").unwrap();
+        cfg.data_dir = unique_temp_dir().to_string_lossy().to_string();
         cfg.channels = serde_yaml::from_str(
             r#"
 openclaw-weixin:
@@ -913,46 +1872,61 @@ openclaw-weixin:
         let selected = select_runtime_context(&runtimes, "side").unwrap();
         assert_eq!(selected.channel_name, "openclaw-weixin.side");
         assert!(select_runtime_context(&runtimes, "missing").is_none());
+        let _ = fs::remove_dir_all(cfg.data_dir);
     }
 
     #[tokio::test]
     async fn test_weixin_adapter_rejects_missing_context_token() {
-        let adapter = WeixinAdapter::new(
-            "openclaw-weixin.test-missing".to_string(),
-            "acc".to_string(),
-            "true".to_string(),
-        );
+        let root = unique_temp_dir();
+        let runtime = WeixinRuntimeContext {
+            channel_name: "openclaw-weixin.test".to_string(),
+            account_id: String::new(),
+            local_account_key: "default".to_string(),
+            send_command: String::new(),
+            allowed_user_ids: Vec::new(),
+            webhook_token: String::new(),
+            bot_username: "bot".to_string(),
+            model: None,
+            mode: WeixinMode::Native,
+            base_url: DEFAULT_BASE_URL.to_string(),
+            state_root: root.clone(),
+        };
+        let adapter = WeixinAdapter::from_runtime(&runtime);
         let err = adapter
             .send_text("user@im.wechat", "hello")
             .await
             .unwrap_err();
         assert!(err.contains("context_token"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn test_weixin_adapter_exports_payload_env() {
-        let root = std::env::temp_dir().join(format!("mc_weixin_test_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        let root = unique_temp_dir();
         let output_path = root.join("payload.json");
-        cache_context_token(
-            "openclaw-weixin.test-send",
-            "user@im.wechat",
-            "ctx-token-123",
-        );
-        let command = format!(
-            "printf '%s' \"$MICROCLAW_WEIXIN_PAYLOAD\" > '{}'",
-            output_path.display()
-        );
-        let adapter = WeixinAdapter::new(
-            "openclaw-weixin.test-send".to_string(),
-            "acc-1".to_string(),
-            command,
-        );
+        let runtime = WeixinRuntimeContext {
+            channel_name: "openclaw-weixin.test-send".to_string(),
+            account_id: String::new(),
+            local_account_key: "default".to_string(),
+            send_command: format!(
+                "printf '%s' \"$MICROCLAW_WEIXIN_PAYLOAD\" > '{}'",
+                output_path.display()
+            ),
+            allowed_user_ids: Vec::new(),
+            webhook_token: String::new(),
+            bot_username: "bot".to_string(),
+            model: None,
+            mode: WeixinMode::Bridge,
+            base_url: DEFAULT_BASE_URL.to_string(),
+            state_root: root.clone(),
+        };
+        persist_context_token(&runtime, "user@im.wechat", "ctx-token-123").unwrap();
+        let adapter = WeixinAdapter::from_runtime(&runtime);
         adapter.send_text("user@im.wechat", "hello").await.unwrap();
 
         let payload = fs::read_to_string(&output_path).unwrap();
         assert!(payload.contains("\"action\":\"send_text\""));
-        assert!(payload.contains("\"account_id\":\"acc-1\""));
+        assert!(payload.contains("\"account_id\":\"default\""));
         assert!(payload.contains("\"target\":\"user@im.wechat\""));
         assert!(payload.contains("\"context_token\":\"ctx-token-123\""));
         assert!(payload.contains("\"text\":\"hello\""));
@@ -971,7 +1945,7 @@ openclaw-weixin:
             timestamp: None,
             context_token: String::new(),
             item_list: Vec::new(),
-            message: Some(WeixinWebhookMessage {
+            message: Some(WeixinWireMessage {
                 from_user_id: "alice@im.wechat".to_string(),
                 message_id: Some(FlexibleId::Integer(42)),
                 create_time_ms: Some(123_456),
@@ -996,6 +1970,8 @@ openclaw-weixin:
                         ..Default::default()
                     },
                 ],
+                message_type: Some(MSG_TYPE_USER),
+                message_state: None,
             }),
         };
 
@@ -1008,37 +1984,23 @@ openclaw-weixin:
     }
 
     #[test]
-    fn test_normalize_weixin_inbound_prefers_explicit_root_fields() {
-        let payload = WeixinWebhookPayload {
-            account_id: "main".to_string(),
-            from_user_id: "root@im.wechat".to_string(),
-            text: "root text".to_string(),
-            message_id: Some(FlexibleId::String("msg-root".to_string())),
-            timestamp_ms: Some(777),
-            timestamp: Some("2026-03-22T12:00:00Z".to_string()),
-            context_token: "ctx-root".to_string(),
-            item_list: Vec::new(),
-            message: Some(WeixinWebhookMessage {
-                from_user_id: "nested@im.wechat".to_string(),
-                message_id: Some(FlexibleId::Unsigned(100)),
-                create_time_ms: Some(1000),
-                context_token: "ctx-nested".to_string(),
-                item_list: vec![WeixinWebhookMessageItem {
-                    r#type: 1,
-                    text_item: Some(WeixinWebhookTextItem {
-                        text: "nested text".to_string(),
-                    }),
-                    ..Default::default()
-                }],
-            }),
+    fn test_normalize_polled_message_filters_non_user_messages() {
+        let message = WeixinWireMessage {
+            from_user_id: "bot@im.wechat".to_string(),
+            message_id: Some(FlexibleId::Integer(5)),
+            create_time_ms: Some(1),
+            context_token: "ctx".to_string(),
+            item_list: vec![WeixinWebhookMessageItem {
+                r#type: 1,
+                text_item: Some(WeixinWebhookTextItem {
+                    text: "ignored".to_string(),
+                }),
+                ..Default::default()
+            }],
+            message_type: Some(MSG_TYPE_BOT),
+            message_state: Some(MSG_STATE_FINISH),
         };
-
-        let normalized = normalize_weixin_inbound(&payload).unwrap();
-        assert_eq!(normalized.sender, "root@im.wechat");
-        assert_eq!(normalized.text, "root text");
-        assert_eq!(normalized.message_id, "msg-root");
-        assert_eq!(normalized.timestamp_ms, Some(777));
-        assert_eq!(normalized.context_token, "ctx-root");
+        assert!(normalize_polled_message(&message).is_none());
     }
 
     #[test]
@@ -1055,5 +2017,41 @@ openclaw-weixin:
             HeaderValue::from_static("header-token"),
         );
         assert_eq!(provided_weixin_webhook_token(&headers), "header-token");
+    }
+
+    #[test]
+    fn test_account_state_roundtrip_persists_context_tokens() {
+        let root = unique_temp_dir();
+        let runtime = WeixinRuntimeContext {
+            channel_name: CHANNEL_KEY.to_string(),
+            account_id: String::new(),
+            local_account_key: "default".to_string(),
+            send_command: String::new(),
+            allowed_user_ids: Vec::new(),
+            webhook_token: String::new(),
+            bot_username: "bot".to_string(),
+            model: None,
+            mode: WeixinMode::Native,
+            base_url: DEFAULT_BASE_URL.to_string(),
+            state_root: root.clone(),
+        };
+        persist_context_token(&runtime, "alice@im.wechat", "ctx-a").unwrap();
+        persist_context_token(&runtime, "bob@im.wechat", "ctx-b").unwrap();
+
+        let stored = load_account_data(&root, "default").unwrap();
+        assert_eq!(
+            stored
+                .context_tokens
+                .get("alice@im.wechat")
+                .map(String::as_str),
+            Some("ctx-a")
+        );
+        assert_eq!(
+            resolve_context_token_from_store(&root, "default", CHANNEL_KEY, "bob@im.wechat")
+                .as_deref(),
+            Some("ctx-b")
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

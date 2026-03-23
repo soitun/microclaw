@@ -1,14 +1,37 @@
-# OpenClaw Weixin Bridge
+# OpenClaw Weixin
 
-MicroClaw does not execute OpenClaw channel plugins directly. `@tencent-weixin/openclaw-weixin` depends on the OpenClaw plugin runtime, so the supported MicroClaw pattern is a sidecar bridge:
+MicroClaw now supports OpenClaw Weixin in two modes:
 
-1. Run the Weixin login + long-poll logic in a separate Node process.
-2. Forward inbound Weixin messages into MicroClaw over a webhook.
-3. Let MicroClaw send outbound replies back through a configured `send_command`.
+1. Native Rust mode
+2. Bridge mode
 
-This document describes the MicroClaw side of that contract.
+Native mode covers the core text flow directly in Rust:
 
-## Config
+- QR login
+- persisted bot credentials
+- long polling via `getupdates`
+- inbound webhook compatibility
+- text replies via `sendmessage`
+- persisted `context_token` cache
+- persisted `get_updates_buf`
+
+Bridge mode remains available for:
+
+- existing `@tencent-weixin/openclaw-weixin` deployments
+- custom Node sidecars
+- attachment delivery while native mode is still text-only
+
+## Mode Selection
+
+`channels.openclaw-weixin.mode` supports:
+
+- `native`: always use native Rust login + polling + text send
+- `bridge`: disable native polling and require `send_command`
+- `auto`: prefer native when credentials exist or when `send_command` is empty; otherwise use bridge
+
+Per-account overrides are also supported through `channels.openclaw-weixin.accounts.<id>.mode`.
+
+## Native Config
 
 Single-account example:
 
@@ -16,6 +39,76 @@ Single-account example:
 channels:
   openclaw-weixin:
     enabled: true
+    mode: native
+    base_url: https://ilinkai.weixin.qq.com
+    allowed_user_ids: "alice@im.wechat,bob@im.wechat"
+```
+
+Multi-account example:
+
+```yaml
+channels:
+  openclaw-weixin:
+    enabled: true
+    mode: auto
+    default_account: main
+    accounts:
+      main:
+        mode: native
+      ops:
+        mode: bridge
+        send_command: node /opt/weixin-bridge/send-ops.mjs
+        webhook_token: replace-me-ops
+```
+
+## Native CLI
+
+Login and persist credentials:
+
+```sh
+microclaw weixin login
+microclaw weixin login --account ops
+microclaw weixin login --account ops --base-url https://ilinkai.weixin.qq.com
+```
+
+Inspect local state:
+
+```sh
+microclaw weixin status
+microclaw weixin status --account ops
+```
+
+Remove local credentials and sync cursor:
+
+```sh
+microclaw weixin logout
+microclaw weixin logout --account ops
+```
+
+Native credentials are stored under:
+
+- `<data_dir>/openclaw-weixin/accounts/<account>.json`
+- `<data_dir>/openclaw-weixin/sync/<account>.txt`
+
+## Native Behavior And Limits
+
+- Native polling starts automatically on `microclaw start` when mode resolves to native and local credentials are present.
+- Inbound messages may arrive from long polling or from a compatible webhook; both paths share the same normalization and agent loop.
+- Replying requires a previously seen `context_token`, so proactive sends to a never-seen user are not possible yet.
+- Native outbound delivery is currently text-only.
+- If you need attachments today, keep `send_command` configured and use bridge mode for that account.
+
+## Bridge Config
+
+Bridge mode is still the right option when you want to keep `@tencent-weixin/openclaw-weixin` or any custom sidecar in charge of login and outbound delivery.
+
+Single-account example:
+
+```yaml
+channels:
+  openclaw-weixin:
+    enabled: true
+    mode: bridge
     webhook_path: /openclaw-weixin/messages
     webhook_token: replace-me
     send_command: node /opt/weixin-bridge/send.mjs
@@ -28,6 +121,7 @@ Multi-account example:
 channels:
   openclaw-weixin:
     enabled: true
+    mode: bridge
     default_account: main
     accounts:
       main:
@@ -94,7 +188,7 @@ For `item_list`, MicroClaw currently normalizes:
 - file -> `[file]` or `[file: <name>]`
 - video -> `[video]`
 
-## Outbound Command Contract
+## Bridge Outbound Command Contract
 
 MicroClaw executes `send_command` with `sh -lc`.
 
@@ -139,12 +233,12 @@ Weixin replies require a `context_token`. MicroClaw caches the latest token per 
 
 Implications:
 
-- A user must send at least one inbound message before MicroClaw can reply through `send_command`.
-- Scheduled or proactive delivery to a never-seen Weixin user will fail until the bridge has posted one inbound webhook carrying a `context_token`.
+- A user must send at least one inbound message before MicroClaw can reply.
+- Scheduled or proactive delivery to a never-seen Weixin user will fail until MicroClaw has seen one inbound message carrying a `context_token`.
 
 ## Using `@tencent-weixin/openclaw-weixin`
 
-The npm package can still provide the Node-side login and long-polling flow. The bridge only needs to translate:
+The npm package can still provide the Node-side login and long-polling flow. In that setup, the bridge only needs to translate:
 
 - package inbound updates -> MicroClaw webhook payload above
 - MicroClaw `send_command` env payload -> package send-message logic
