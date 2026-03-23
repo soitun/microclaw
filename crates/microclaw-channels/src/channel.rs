@@ -81,7 +81,7 @@ fn infer_channel_from_chat_type(chat_type: &str) -> Option<&'static str> {
         return Some("qq");
     }
     if chat_type.starts_with("weixin_") {
-        return Some("openclaw-weixin");
+        return Some("weixin");
     }
     if chat_type.starts_with("irc_") {
         return Some("irc");
@@ -265,10 +265,7 @@ mod tests {
             Some("telegram")
         );
         assert_eq!(infer_channel_from_chat_type("discord_dm"), Some("discord"));
-        assert_eq!(
-            infer_channel_from_chat_type("weixin_dm"),
-            Some("openclaw-weixin")
-        );
+        assert_eq!(infer_channel_from_chat_type("weixin_dm"), Some("weixin"));
     }
 
     #[test]

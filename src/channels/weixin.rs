@@ -28,10 +28,10 @@ use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
 use microclaw_storage::db::{call_blocking, StoredMessage};
 
-const CHANNEL_KEY: &str = "openclaw-weixin";
+const CHANNEL_KEY: &str = "weixin";
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
-const DEFAULT_WEBHOOK_PATH: &str = "/openclaw-weixin/messages";
+const DEFAULT_WEBHOOK_PATH: &str = "/weixin/messages";
 const BOT_TYPE: &str = "3";
 const LONG_POLL_TIMEOUT_MS: u64 = 35_000;
 const QR_POLL_TIMEOUT_MS: u64 = 35_000;
@@ -71,7 +71,7 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
         },
         ChannelFieldDef {
             yaml_key: "webhook_path",
-            label: "OpenClaw Weixin webhook path (default /openclaw-weixin/messages)",
+            label: "OpenClaw Weixin webhook path (default /weixin/messages)",
             default: DEFAULT_WEBHOOK_PATH,
             secret: false,
             required: false,
@@ -1402,7 +1402,7 @@ fn normalize_polled_message(message: &WeixinWireMessage) -> Option<NormalizedWei
 
 fn provided_weixin_webhook_token(headers: &HeaderMap) -> String {
     if let Some(token) = headers
-        .get("x-openclaw-weixin-webhook-token")
+        .get("x-weixin-webhook-token")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -1680,7 +1680,7 @@ impl ChannelAdapter for WeixinAdapter {
     async fn send_text(&self, external_chat_id: &str, text: &str) -> Result<(), String> {
         let context_token = self.resolve_context_token(external_chat_id).ok_or_else(|| {
             format!(
-                "openclaw-weixin requires a cached context_token for target '{}'; wait for an inbound message before replying",
+                "weixin requires a cached context_token for target '{}'; wait for an inbound message before replying",
                 external_chat_id
             )
         })?;
@@ -1704,7 +1704,7 @@ impl ChannelAdapter for WeixinAdapter {
     ) -> Result<String, String> {
         let context_token = self.resolve_context_token(external_chat_id).ok_or_else(|| {
             format!(
-                "openclaw-weixin requires a cached context_token for target '{}'; wait for an inbound message before replying",
+                "weixin requires a cached context_token for target '{}'; wait for an inbound message before replying",
                 external_chat_id
             )
         })?;
@@ -1747,7 +1747,7 @@ async fn process_weixin_inbound_message(
     let external_chat_id = sender.to_string();
     let chat_id = call_blocking(app_state.db.clone(), {
         let channel_name = runtime_ctx.channel_name.clone();
-        let title = format!("openclaw-weixin-{external_chat_id}");
+        let title = format!("weixin-{external_chat_id}");
         let external_chat_id = external_chat_id.clone();
         move |db| {
             db.resolve_or_create_chat_id(
@@ -2304,7 +2304,7 @@ mod tests {
         cfg.data_dir = unique_temp_dir().to_string_lossy().to_string();
         cfg.channels = serde_yaml::from_str(
             r#"
-openclaw-weixin:
+weixin:
   enabled: true
   base_url: https://example.invalid
   default_account: ops
@@ -2334,7 +2334,7 @@ openclaw-weixin:
 
         let secondary = runtimes
             .iter()
-            .find(|runtime| runtime.channel_name == "openclaw-weixin.main")
+            .find(|runtime| runtime.channel_name == "weixin.main")
             .unwrap();
         assert_eq!(secondary.account_id, "main");
         assert_eq!(secondary.allowed_user_ids, vec!["alice", "bob"]);
@@ -2348,7 +2348,7 @@ openclaw-weixin:
         cfg.data_dir = unique_temp_dir().to_string_lossy().to_string();
         cfg.channels = serde_yaml::from_str(
             r#"
-openclaw-weixin:
+weixin:
   enabled: true
   default_account: main
   accounts:
@@ -2361,7 +2361,7 @@ openclaw-weixin:
         .unwrap();
         let runtimes = build_weixin_runtime_contexts(&cfg);
         let selected = select_runtime_context(&runtimes, "side").unwrap();
-        assert_eq!(selected.channel_name, "openclaw-weixin.side");
+        assert_eq!(selected.channel_name, "weixin.side");
         assert!(select_runtime_context(&runtimes, "missing").is_none());
         let _ = fs::remove_dir_all(cfg.data_dir);
     }
@@ -2370,7 +2370,7 @@ openclaw-weixin:
     async fn test_weixin_adapter_rejects_missing_context_token() {
         let root = unique_temp_dir();
         let runtime = WeixinRuntimeContext {
-            channel_name: "openclaw-weixin.test".to_string(),
+            channel_name: "weixin.test".to_string(),
             account_id: String::new(),
             local_account_key: "default".to_string(),
             allowed_user_ids: Vec::new(),
@@ -2469,7 +2469,7 @@ openclaw-weixin:
         assert_eq!(provided_weixin_webhook_token(&headers), "bridge-token");
 
         headers.insert(
-            "x-openclaw-weixin-webhook-token",
+            "x-weixin-webhook-token",
             HeaderValue::from_static("header-token"),
         );
         assert_eq!(provided_weixin_webhook_token(&headers), "header-token");

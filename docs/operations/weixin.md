@@ -1,6 +1,6 @@
 # OpenClaw Weixin
 
-MicroClaw now supports OpenClaw Weixin as a native Rust channel. No Node sidecar or `@tencent-weixin/openclaw-weixin` bridge is required for login, polling, text replies, or attachment replies.
+MicroClaw now supports Weixin as a native Rust channel. No Node sidecar or `@tencent-weixin/openclaw-weixin` bridge is required for login, polling, text replies, or attachment replies.
 
 Native support includes:
 
@@ -19,7 +19,7 @@ Single-account example:
 
 ```yaml
 channels:
-  openclaw-weixin:
+  weixin:
     enabled: true
     base_url: https://ilinkai.weixin.qq.com
     cdn_base_url: https://novac2c.cdn.weixin.qq.com/c2c
@@ -30,7 +30,7 @@ Multi-account example:
 
 ```yaml
 channels:
-  openclaw-weixin:
+  weixin:
     enabled: true
     default_account: main
     accounts:
@@ -76,8 +76,8 @@ microclaw weixin logout --account ops
 
 Native credentials are stored under:
 
-- `<data_dir>/openclaw-weixin/accounts/<account>.json`
-- `<data_dir>/openclaw-weixin/sync/<account>.txt`
+- `<data_dir>/weixin/accounts/<account>.json`
+- `<data_dir>/weixin/sync/<account>.txt`
 
 ## Runtime Behavior
 
@@ -96,7 +96,7 @@ Send `POST` requests to the configured `webhook_path`.
 Headers:
 
 - `Content-Type: application/json`
-- `x-openclaw-weixin-webhook-token: <token>` when `webhook_token` is configured
+- `x-weixin-webhook-token: <token>` when `webhook_token` is configured
 - `Authorization: Bearer <token>` is also accepted as a fallback
 
 Body:

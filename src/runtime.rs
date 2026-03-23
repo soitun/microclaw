@@ -367,7 +367,7 @@ pub async fn run(
     );
     let weixin_runtimes: Vec<WeixinRuntimeContext> = prepare_channel_runtimes(
         &config,
-        "openclaw-weixin",
+        "weixin",
         &mut registry,
         &mut llm_model_overrides,
         build_weixin_runtime_contexts,
