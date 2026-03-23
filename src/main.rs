@@ -229,7 +229,7 @@ Options:
   --base-url <u>  Override base URL for login only
 
 Notes:
-  - Native mode currently supports text send/receive plus persisted context tokens.
+  - Native mode supports QR login, polling, text, and file/image/video attachment delivery.
   - Bridge mode remains available through `channels.openclaw-weixin.send_command`."#
     );
 }

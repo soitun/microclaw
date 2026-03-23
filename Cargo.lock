@@ -1204,6 +1204,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ecb"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a8bfa975b1aec2145850fcaa1c6fe269a16578c44705a532ae3edc92b8881c7"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2755,6 +2764,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2764,6 +2779,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 name = "microclaw"
 version = "0.1.27"
 dependencies = [
+ "aes",
  "agent-client-protocol",
  "anyhow",
  "argon2",
@@ -2776,12 +2792,14 @@ dependencies = [
  "clap",
  "cron",
  "crossterm",
+ "ecb",
  "futures-util",
  "glob",
  "http",
  "iana-time-zone",
  "include_dir",
  "matrix-sdk",
+ "md5",
  "microclaw-app",
  "microclaw-channels",
  "microclaw-clawhub",

@@ -19,7 +19,7 @@ Bridge mode remains available for:
 
 - existing `@tencent-weixin/openclaw-weixin` deployments
 - custom Node sidecars
-- attachment delivery while native mode is still text-only
+- custom interoperability or migration scenarios
 
 ## Mode Selection
 
@@ -95,8 +95,8 @@ Native credentials are stored under:
 - Native polling starts automatically on `microclaw start` when mode resolves to native and local credentials are present.
 - Inbound messages may arrive from long polling or from a compatible webhook; both paths share the same normalization and agent loop.
 - Replying requires a previously seen `context_token`, so proactive sends to a never-seen user are not possible yet.
-- Native outbound delivery is currently text-only.
-- If you need attachments today, keep `send_command` configured and use bridge mode for that account.
+- Native outbound delivery supports text, image, video, and generic file attachments.
+- Bridge mode is now optional rather than required.
 
 ## Bridge Config
 

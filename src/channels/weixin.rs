@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyInit};
+use aes::Aes128;
 use axum::http::HeaderMap;
 use axum::{Json, Router};
 use base64::Engine as _;
+use ecb::Encryptor as EcbEncryptor;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
@@ -27,6 +31,7 @@ use microclaw_storage::db::{call_blocking, StoredMessage};
 
 const CHANNEL_KEY: &str = "openclaw-weixin";
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+const DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 const DEFAULT_WEBHOOK_PATH: &str = "/openclaw-weixin/messages";
 const BOT_TYPE: &str = "3";
 const LONG_POLL_TIMEOUT_MS: u64 = 35_000;
@@ -56,6 +61,13 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
             yaml_key: "base_url",
             label: "OpenClaw Weixin API base URL",
             default: DEFAULT_BASE_URL,
+            secret: false,
+            required: false,
+        },
+        ChannelFieldDef {
+            yaml_key: "cdn_base_url",
+            label: "OpenClaw Weixin CDN base URL",
+            default: DEFAULT_CDN_BASE_URL,
             secret: false,
             required: false,
         },
@@ -112,6 +124,10 @@ fn default_base_url() -> String {
     DEFAULT_BASE_URL.to_string()
 }
 
+fn default_cdn_base_url() -> String {
+    DEFAULT_CDN_BASE_URL.to_string()
+}
+
 fn default_webhook_path() -> String {
     DEFAULT_WEBHOOK_PATH.to_string()
 }
@@ -144,6 +160,8 @@ pub struct WeixinAccountConfig {
     pub mode: Option<WeixinMode>,
     #[serde(default)]
     pub base_url: String,
+    #[serde(default)]
+    pub cdn_base_url: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -164,6 +182,8 @@ pub struct WeixinChannelConfig {
     pub mode: WeixinMode,
     #[serde(default = "default_base_url")]
     pub base_url: String,
+    #[serde(default = "default_cdn_base_url")]
+    pub cdn_base_url: String,
     #[serde(default)]
     pub accounts: HashMap<String, WeixinAccountConfig>,
     #[serde(default)]
@@ -204,6 +224,36 @@ struct WeixinWebhookVoiceItem {
 struct WeixinWebhookFileItem {
     #[serde(default)]
     file_name: String,
+    #[serde(default)]
+    len: String,
+    #[serde(default)]
+    media: Option<WeixinCdnMedia>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinCdnMedia {
+    #[serde(default)]
+    encrypt_query_param: String,
+    #[serde(default)]
+    aes_key: String,
+    #[serde(default)]
+    encrypt_type: i32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWebhookImageItem {
+    #[serde(default)]
+    media: Option<WeixinCdnMedia>,
+    #[serde(default)]
+    mid_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct WeixinWebhookVideoItem {
+    #[serde(default)]
+    media: Option<WeixinCdnMedia>,
+    #[serde(default)]
+    video_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -222,6 +272,10 @@ struct WeixinWebhookMessageItem {
     voice_item: Option<WeixinWebhookVoiceItem>,
     #[serde(default)]
     file_item: Option<WeixinWebhookFileItem>,
+    #[serde(default)]
+    image_item: Option<WeixinWebhookImageItem>,
+    #[serde(default)]
+    video_item: Option<WeixinWebhookVideoItem>,
     #[serde(default)]
     ref_msg: Option<WeixinWebhookRefMessage>,
 }
@@ -301,6 +355,14 @@ struct WeixinGetUpdatesResp {
     longpolling_timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct WeixinGetUploadUrlResp {
+    #[serde(default)]
+    upload_param: String,
+    #[serde(default)]
+    thumb_upload_param: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoredWeixinAccount {
     #[serde(default)]
@@ -321,6 +383,7 @@ struct StoredWeixinAccount {
 struct NativeWeixinAccount {
     token: String,
     base_url: String,
+    cdn_base_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +408,7 @@ pub struct WeixinRuntimeContext {
     pub model: Option<String>,
     pub mode: WeixinMode,
     pub base_url: String,
+    pub cdn_base_url: String,
     pub state_root: PathBuf,
 }
 
@@ -563,6 +627,61 @@ fn stored_account_exists(state_root: &Path, local_account_key: &str) -> bool {
     account_file_path(state_root, local_account_key).exists()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeixinAttachmentKind {
+    Image,
+    Video,
+    File,
+}
+
+#[derive(Debug, Clone)]
+struct UploadedWeixinMedia {
+    download_encrypted_query_param: String,
+    aes_key: Vec<u8>,
+    file_size: u64,
+    file_size_ciphertext: u64,
+}
+
+fn infer_attachment_kind(file_path: &Path) -> WeixinAttachmentKind {
+    let ext = file_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => WeixinAttachmentKind::Image,
+        "mp4" | "mov" | "webm" | "mkv" | "avi" => WeixinAttachmentKind::Video,
+        _ => WeixinAttachmentKind::File,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn aes_ecb_padded_size(plaintext_size: usize) -> usize {
+    ((plaintext_size + 1).div_ceil(16)) * 16
+}
+
+fn encrypt_aes_ecb(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    let cipher = EcbEncryptor::<Aes128>::new_from_slice(key)
+        .map_err(|e| format!("Failed to initialize AES-128-ECB cipher: {e}"))?;
+    Ok(cipher.encrypt_padded_vec_mut::<Pkcs7>(plaintext))
+}
+
+fn build_cdn_upload_url(cdn_base_url: &str, upload_param: &str, filekey: &str) -> String {
+    format!(
+        "{}/upload?encrypted_query_param={}&filekey={}",
+        ensure_trailing_slash(cdn_base_url).trim_end_matches('/'),
+        urlencoding::encode(upload_param),
+        urlencoding::encode(filekey)
+    )
+}
+
 fn ensure_trailing_slash(base_url: &str) -> String {
     if base_url.ends_with('/') {
         base_url.to_string()
@@ -649,6 +768,72 @@ async fn api_get(
     Ok(text)
 }
 
+async fn upload_cdn_ciphertext(
+    client: &reqwest::Client,
+    cdn_base_url: &str,
+    upload_param: &str,
+    filekey: &str,
+    plaintext: &[u8],
+    aes_key: &[u8],
+) -> Result<String, String> {
+    let ciphertext = encrypt_aes_ecb(plaintext, aes_key)?;
+    let cdn_url = build_cdn_upload_url(cdn_base_url, upload_param, filekey);
+    let mut last_error = String::new();
+
+    for attempt in 1..=3 {
+        let response = client
+            .post(&cdn_url)
+            .timeout(Duration::from_millis(DEFAULT_API_TIMEOUT_MS))
+            .header("Content-Type", "application/octet-stream")
+            .body(ciphertext.clone())
+            .send()
+            .await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body = response.text().await.unwrap_or_default();
+                if status.is_success() {
+                    if let Some(value) = headers
+                        .get("x-encrypted-param")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        return Ok(value.to_string());
+                    }
+                    return Err("CDN upload response missing x-encrypted-param header".to_string());
+                }
+
+                let error_message = headers
+                    .get("x-error-message")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(body.trim());
+                last_error = format!(
+                    "CDN upload failed with HTTP {}: {}",
+                    status.as_u16(),
+                    error_message
+                );
+                if status.is_client_error() {
+                    return Err(last_error);
+                }
+            }
+            Err(err) => {
+                last_error = format!("CDN upload request failed: {err}");
+            }
+        }
+
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+        }
+    }
+
+    Err(last_error)
+}
+
 async fn fetch_qrcode(client: &reqwest::Client, base_url: &str) -> Result<QrCodeResponse, String> {
     let url = format!(
         "{}ilink/bot/get_bot_qrcode?bot_type={}",
@@ -706,6 +891,43 @@ async fn get_updates(
     serde_json::from_str(&raw).map_err(|e| format!("Failed to parse getupdates response: {e}"))
 }
 
+async fn get_upload_url(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    filekey: &str,
+    media_type: i32,
+    to_user_id: &str,
+    rawsize: u64,
+    rawfilemd5: &str,
+    filesize: u64,
+    aeskey_hex: &str,
+) -> Result<WeixinGetUploadUrlResp, String> {
+    let body = serde_json::json!({
+        "filekey": filekey,
+        "media_type": media_type,
+        "to_user_id": to_user_id,
+        "rawsize": rawsize,
+        "rawfilemd5": rawfilemd5,
+        "filesize": filesize,
+        "no_need_thumb": true,
+        "aeskey": aeskey_hex,
+        "base_info": {
+            "channel_version": env!("CARGO_PKG_VERSION")
+        }
+    })
+    .to_string();
+    let raw = api_post(
+        client,
+        &account.base_url,
+        "ilink/bot/getuploadurl",
+        body,
+        Some(&account.token),
+        DEFAULT_API_TIMEOUT_MS,
+    )
+    .await?;
+    serde_json::from_str(&raw).map_err(|e| format!("Failed to parse getuploadurl response: {e}"))
+}
+
 fn generate_client_id() -> String {
     format!("microclaw-weixin:{}", uuid::Uuid::new_v4())
 }
@@ -748,6 +970,153 @@ async fn send_text_message_native(
     )
     .await?;
     Ok(client_id)
+}
+
+async fn send_single_item_message_native(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    to_user_id: &str,
+    item: WeixinWebhookMessageItem,
+    context_token: &str,
+) -> Result<String, String> {
+    let client_id = generate_client_id();
+    let body = serde_json::json!({
+        "msg": {
+            "from_user_id": "",
+            "to_user_id": to_user_id,
+            "client_id": client_id,
+            "message_type": MSG_TYPE_BOT,
+            "message_state": MSG_STATE_FINISH,
+            "item_list": [item],
+            "context_token": context_token,
+        },
+        "base_info": {
+            "channel_version": env!("CARGO_PKG_VERSION")
+        }
+    })
+    .to_string();
+    let _ = api_post(
+        client,
+        &account.base_url,
+        "ilink/bot/sendmessage",
+        body,
+        Some(&account.token),
+        DEFAULT_API_TIMEOUT_MS,
+    )
+    .await?;
+    Ok(client_id)
+}
+
+async fn upload_media_native(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    to_user_id: &str,
+    file_path: &Path,
+    kind: WeixinAttachmentKind,
+) -> Result<UploadedWeixinMedia, String> {
+    let plaintext = fs::read(file_path)
+        .map_err(|e| format!("Failed to read attachment '{}': {e}", file_path.display()))?;
+    let rawsize = plaintext.len() as u64;
+    let rawfilemd5 = format!("{:x}", md5::compute(&plaintext));
+    let file_size_ciphertext = aes_ecb_padded_size(plaintext.len()) as u64;
+    let filekey_uuid = uuid::Uuid::new_v4();
+    let filekey = hex_encode(filekey_uuid.as_bytes());
+    let aes_key = *uuid::Uuid::new_v4().as_bytes();
+    let aeskey_hex = hex_encode(&aes_key);
+    let media_type = match kind {
+        WeixinAttachmentKind::Image => 1,
+        WeixinAttachmentKind::Video => 2,
+        WeixinAttachmentKind::File => 3,
+    };
+
+    let upload_url = get_upload_url(
+        client,
+        account,
+        &filekey,
+        media_type,
+        to_user_id,
+        rawsize,
+        &rawfilemd5,
+        file_size_ciphertext,
+        &aeskey_hex,
+    )
+    .await?;
+    if upload_url.upload_param.trim().is_empty() {
+        return Err("Weixin getuploadurl returned empty upload_param".to_string());
+    }
+    let _ = upload_url.thumb_upload_param;
+
+    let download_encrypted_query_param = upload_cdn_ciphertext(
+        client,
+        &account.cdn_base_url,
+        &upload_url.upload_param,
+        &filekey,
+        &plaintext,
+        &aes_key,
+    )
+    .await?;
+
+    Ok(UploadedWeixinMedia {
+        download_encrypted_query_param,
+        aes_key: aes_key.to_vec(),
+        file_size: rawsize,
+        file_size_ciphertext,
+    })
+}
+
+async fn send_attachment_native(
+    client: &reqwest::Client,
+    account: &NativeWeixinAccount,
+    to_user_id: &str,
+    file_path: &Path,
+    caption: Option<&str>,
+    context_token: &str,
+) -> Result<String, String> {
+    let kind = infer_attachment_kind(file_path);
+    let uploaded = upload_media_native(client, account, to_user_id, file_path, kind).await?;
+    let media = WeixinCdnMedia {
+        encrypt_query_param: uploaded.download_encrypted_query_param,
+        aes_key: base64::engine::general_purpose::STANDARD.encode(uploaded.aes_key),
+        encrypt_type: 1,
+    };
+
+    if let Some(text) = caption.map(str::trim).filter(|value| !value.is_empty()) {
+        let _ = send_text_message_native(client, account, to_user_id, text, context_token).await?;
+    }
+
+    let item = match kind {
+        WeixinAttachmentKind::Image => WeixinWebhookMessageItem {
+            r#type: 2,
+            image_item: Some(WeixinWebhookImageItem {
+                media: Some(media),
+                mid_size: Some(uploaded.file_size_ciphertext),
+            }),
+            ..Default::default()
+        },
+        WeixinAttachmentKind::Video => WeixinWebhookMessageItem {
+            r#type: 5,
+            video_item: Some(WeixinWebhookVideoItem {
+                media: Some(media),
+                video_size: Some(uploaded.file_size_ciphertext),
+            }),
+            ..Default::default()
+        },
+        WeixinAttachmentKind::File => WeixinWebhookMessageItem {
+            r#type: 4,
+            file_item: Some(WeixinWebhookFileItem {
+                file_name: file_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("attachment")
+                    .to_string(),
+                len: uploaded.file_size.to_string(),
+                media: Some(media),
+            }),
+            ..Default::default()
+        },
+    };
+
+    send_single_item_message_native(client, account, to_user_id, item, context_token).await
 }
 
 fn summarize_weixin_item(item: &WeixinWebhookMessageItem) -> Option<String> {
@@ -968,6 +1337,11 @@ pub fn build_weixin_runtime_contexts(config: &crate::config::Config) -> Vec<Weix
         } else {
             account_cfg.base_url.trim().to_string()
         };
+        let cdn_base_url = if account_cfg.cdn_base_url.trim().is_empty() {
+            wx_cfg.cdn_base_url.trim().to_string()
+        } else {
+            account_cfg.cdn_base_url.trim().to_string()
+        };
         runtimes.push(WeixinRuntimeContext {
             channel_name,
             account_id: account_id.clone(),
@@ -982,6 +1356,11 @@ pub fn build_weixin_runtime_contexts(config: &crate::config::Config) -> Vec<Weix
                 DEFAULT_BASE_URL.to_string()
             } else {
                 base_url
+            },
+            cdn_base_url: if cdn_base_url.is_empty() {
+                DEFAULT_CDN_BASE_URL.to_string()
+            } else {
+                cdn_base_url
             },
             state_root: state_root.clone(),
         });
@@ -1007,6 +1386,11 @@ pub fn build_weixin_runtime_contexts(config: &crate::config::Config) -> Vec<Weix
                 DEFAULT_BASE_URL.to_string()
             } else {
                 wx_cfg.base_url.trim().to_string()
+            },
+            cdn_base_url: if wx_cfg.cdn_base_url.trim().is_empty() {
+                DEFAULT_CDN_BASE_URL.to_string()
+            } else {
+                wx_cfg.cdn_base_url.trim().to_string()
             },
             state_root,
         });
@@ -1065,6 +1449,7 @@ fn build_default_runtime_context(
         model: None,
         mode: WeixinMode::Native,
         base_url: DEFAULT_BASE_URL.to_string(),
+        cdn_base_url: DEFAULT_CDN_BASE_URL.to_string(),
         state_root: weixin_state_root(Path::new(&config.runtime_data_dir())),
     }
 }
@@ -1108,6 +1493,7 @@ pub struct WeixinAdapter {
     send_command: String,
     mode: WeixinMode,
     base_url: String,
+    cdn_base_url: String,
     state_root: PathBuf,
     http_client: reqwest::Client,
 }
@@ -1120,6 +1506,7 @@ impl WeixinAdapter {
             send_command: runtime.send_command.clone(),
             mode: runtime.mode,
             base_url: runtime.base_url.clone(),
+            cdn_base_url: runtime.cdn_base_url.clone(),
             state_root: runtime.state_root.clone(),
             http_client: reqwest::Client::new(),
         }
@@ -1173,6 +1560,7 @@ impl WeixinAdapter {
         Ok(NativeWeixinAccount {
             token: token.to_string(),
             base_url,
+            cdn_base_url: self.cdn_base_url.clone(),
         })
     }
 
@@ -1278,11 +1666,23 @@ impl ChannelAdapter for WeixinAdapter {
         file_path: &Path,
         caption: Option<&str>,
     ) -> Result<String, String> {
-        if self.send_command.trim().is_empty() {
-            return Err(
-                "OpenClaw Weixin native mode currently supports text only; configure send_command for attachment delivery."
-                    .to_string(),
-            );
+        if self.should_use_native() {
+            let context_token = self.resolve_context_token(external_chat_id).ok_or_else(|| {
+                format!(
+                    "openclaw-weixin requires a cached context_token for target '{}'; wait for an inbound message before replying",
+                    external_chat_id
+                )
+            })?;
+            let account = self.load_native_account()?;
+            return send_attachment_native(
+                &self.http_client,
+                &account,
+                external_chat_id,
+                file_path,
+                caption,
+                &context_token,
+            )
+            .await;
         }
         self.run_send_command(external_chat_id, "", Some(file_path), caption)
     }
@@ -1716,6 +2116,7 @@ pub async fn login_via_cli(
     let _ = writeln!(summary, "Local account key: {}", runtime.local_account_key);
     let _ = writeln!(summary, "Remote account id: {}", account.remote_account_id);
     let _ = writeln!(summary, "Base URL: {}", account.base_url);
+    let _ = writeln!(summary, "CDN Base URL: {}", runtime.cdn_base_url);
     if !account.user_id.trim().is_empty() {
         let _ = writeln!(summary, "Linked user id: {}", account.user_id);
     }
@@ -1730,6 +2131,7 @@ pub fn status_via_cli(config: &Config, account_id: Option<&str>) -> Result<Strin
     let _ = writeln!(out, "Channel: {}", runtime.channel_name);
     let _ = writeln!(out, "Mode: {:?}", runtime.mode);
     let _ = writeln!(out, "Base URL: {}", runtime.base_url);
+    let _ = writeln!(out, "CDN Base URL: {}", runtime.cdn_base_url);
     let _ = writeln!(
         out,
         "Send command configured: {}",
@@ -1838,6 +2240,7 @@ openclaw-weixin:
         assert_eq!(default_runtime.bot_username, "ops-bot");
         assert_eq!(default_runtime.model.as_deref(), Some("gpt-4.1"));
         assert_eq!(default_runtime.mode, WeixinMode::Native);
+        assert_eq!(default_runtime.cdn_base_url, DEFAULT_CDN_BASE_URL);
 
         let secondary = runtimes
             .iter()
@@ -1889,6 +2292,7 @@ openclaw-weixin:
             model: None,
             mode: WeixinMode::Native,
             base_url: DEFAULT_BASE_URL.to_string(),
+            cdn_base_url: DEFAULT_CDN_BASE_URL.to_string(),
             state_root: root.clone(),
         };
         let adapter = WeixinAdapter::from_runtime(&runtime);
@@ -1918,6 +2322,7 @@ openclaw-weixin:
             model: None,
             mode: WeixinMode::Bridge,
             base_url: DEFAULT_BASE_URL.to_string(),
+            cdn_base_url: DEFAULT_CDN_BASE_URL.to_string(),
             state_root: root.clone(),
         };
         persist_context_token(&runtime, "user@im.wechat", "ctx-token-123").unwrap();
@@ -2033,6 +2438,7 @@ openclaw-weixin:
             model: None,
             mode: WeixinMode::Native,
             base_url: DEFAULT_BASE_URL.to_string(),
+            cdn_base_url: DEFAULT_CDN_BASE_URL.to_string(),
             state_root: root.clone(),
         };
         persist_context_token(&runtime, "alice@im.wechat", "ctx-a").unwrap();

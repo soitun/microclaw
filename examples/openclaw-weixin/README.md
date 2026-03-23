@@ -2,7 +2,7 @@
 
 This folder contains bridge helpers for wiring a Weixin sidecar into MicroClaw.
 
-If you want pure Rust text support, prefer native mode and run:
+If you want pure Rust support with native text plus attachment delivery, prefer native mode and run:
 
 ```sh
 microclaw weixin login
