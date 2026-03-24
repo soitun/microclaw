@@ -57,49 +57,49 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
     fields: &[
         ChannelFieldDef {
             yaml_key: "base_url",
-            label: "OpenClaw Weixin API base URL",
+            label: "Weixin API base URL",
             default: DEFAULT_BASE_URL,
             secret: false,
             required: false,
         },
         ChannelFieldDef {
             yaml_key: "cdn_base_url",
-            label: "OpenClaw Weixin CDN base URL",
+            label: "Weixin CDN base URL",
             default: DEFAULT_CDN_BASE_URL,
             secret: false,
             required: false,
         },
         ChannelFieldDef {
             yaml_key: "webhook_path",
-            label: "OpenClaw Weixin webhook path (default /weixin/messages)",
+            label: "Weixin webhook path (default /weixin/messages)",
             default: DEFAULT_WEBHOOK_PATH,
             secret: false,
             required: false,
         },
         ChannelFieldDef {
             yaml_key: "webhook_token",
-            label: "OpenClaw Weixin webhook token (optional)",
+            label: "Weixin webhook token (optional)",
             default: "",
             secret: true,
             required: false,
         },
         ChannelFieldDef {
             yaml_key: "allowed_user_ids",
-            label: "OpenClaw Weixin allowed user ids csv (optional)",
+            label: "Weixin allowed user ids csv (optional)",
             default: "",
             secret: false,
             required: false,
         },
         ChannelFieldDef {
             yaml_key: "bot_username",
-            label: "OpenClaw Weixin bot username override (optional)",
+            label: "Weixin bot username override (optional)",
             default: "",
             secret: false,
             required: false,
         },
         ChannelFieldDef {
             yaml_key: "model",
-            label: "OpenClaw Weixin bot model override (optional)",
+            label: "Weixin bot model override (optional)",
             default: "",
             secret: false,
             required: false,
@@ -745,7 +745,7 @@ async fn get_cached_typing_ticket(
                     (entry.retry_delay_ms.saturating_mul(2)).min(CONFIG_CACHE_MAX_RETRY_MS);
             }
             warn!(
-                "OpenClaw Weixin getconfig returned ret={} for '{}': {}",
+                "Weixin getconfig returned ret={} for '{}': {}",
                 response.ret,
                 runtime.channel_name,
                 response.errmsg.unwrap_or_default()
@@ -764,7 +764,7 @@ async fn get_cached_typing_ticket(
                     (entry.retry_delay_ms.saturating_mul(2)).min(CONFIG_CACHE_MAX_RETRY_MS);
             }
             warn!(
-                "OpenClaw Weixin getconfig failed for '{}'/{}: {}",
+                "Weixin getconfig failed for '{}'/{}: {}",
                 runtime.channel_name, external_chat_id, err
             );
             None
@@ -1739,7 +1739,7 @@ async fn process_weixin_inbound_message(
 
     if let Err(err) = persist_context_token(&runtime_ctx, sender, &normalized.context_token) {
         warn!(
-            "OpenClaw Weixin: failed to persist context token for {}: {}",
+            "Weixin: failed to persist context token for {}: {}",
             sender, err
         );
     }
@@ -1761,10 +1761,7 @@ async fn process_weixin_inbound_message(
     .await
     .unwrap_or(0);
     if chat_id == 0 {
-        error!(
-            "OpenClaw Weixin: failed to resolve chat id for {}",
-            external_chat_id
-        );
+        error!("Weixin: failed to resolve chat id for {}", external_chat_id);
         return;
     }
 
@@ -1829,7 +1826,7 @@ async fn process_weixin_inbound_message(
     .unwrap_or(false);
     if !inserted {
         info!(
-            "OpenClaw Weixin: skipping duplicate message chat_id={} message_id={}",
+            "Weixin: skipping duplicate message chat_id={} message_id={}",
             chat_id, inbound_message_id
         );
         return;
@@ -1878,7 +1875,7 @@ async fn process_weixin_inbound_message(
                 .await
                 {
                     warn!(
-                        "OpenClaw Weixin typing keepalive failed for '{}' / '{}': {}",
+                        "Weixin typing keepalive failed for '{}' / '{}': {}",
                         runtime_channel, sender_id, err
                     );
                     break;
@@ -1929,13 +1926,13 @@ async fn process_weixin_inbound_message(
             if used_send_message_tool {
                 if !response.is_empty() {
                     info!(
-                        "OpenClaw Weixin: suppressing final response for chat {} because send_message already delivered output",
+                        "Weixin: suppressing final response for chat {} because send_message already delivered output",
                         chat_id
                     );
                 }
             } else if !response.is_empty() {
                 if let Err(e) = adapter.send_text(sender, &response).await {
-                    error!("OpenClaw Weixin: failed to send response: {e}");
+                    error!("Weixin: failed to send response: {e}");
                 }
                 let bot_msg = StoredMessage {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -1968,7 +1965,7 @@ async fn process_weixin_inbound_message(
                 )
                 .await;
             }
-            error!("OpenClaw Weixin: error processing message: {e}");
+            error!("Weixin: error processing message: {e}");
         }
     }
 }
@@ -1985,7 +1982,7 @@ async fn start_native_poll_loop(
 
     hydrate_context_token_cache(&runtime);
     info!(
-        "OpenClaw Weixin native polling started for '{}' (account_key={}, base_url={})",
+        "Weixin native polling started for '{}' (account_key={}, base_url={})",
         runtime.channel_name, runtime.local_account_key, account.base_url
     );
 
@@ -1997,7 +1994,7 @@ async fn start_native_poll_loop(
                     if response.ret == SESSION_EXPIRED_ERRCODE || errcode == SESSION_EXPIRED_ERRCODE
                     {
                         error!(
-                            "OpenClaw Weixin session expired for '{}'; run `microclaw weixin login{}` again",
+                            "Weixin session expired for '{}'; run `microclaw weixin login{}` again",
                             runtime.channel_name,
                             if runtime.local_account_key == "default" {
                                 "".to_string()
@@ -2010,7 +2007,7 @@ async fn start_native_poll_loop(
                     }
                     consecutive_failures += 1;
                     warn!(
-                        "OpenClaw Weixin getupdates failed for '{}': ret={} errcode={} errmsg={}",
+                        "Weixin getupdates failed for '{}': ret={} errcode={} errmsg={}",
                         runtime.channel_name,
                         response.ret,
                         errcode,
@@ -2034,7 +2031,7 @@ async fn start_native_poll_loop(
                         &runtime.local_account_key,
                         &get_updates_buf,
                     ) {
-                        warn!("OpenClaw Weixin: failed to save sync buf: {err}");
+                        warn!("Weixin: failed to save sync buf: {err}");
                     }
                 }
                 if let Some(timeout_ms) = response
@@ -2057,7 +2054,7 @@ async fn start_native_poll_loop(
             Err(err) => {
                 consecutive_failures += 1;
                 warn!(
-                    "OpenClaw Weixin polling error for '{}': {}",
+                    "Weixin polling error for '{}': {}",
                     runtime.channel_name, err
                 );
                 let sleep_ms = if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
@@ -2074,10 +2071,7 @@ async fn start_native_poll_loop(
 
 pub async fn start_weixin_bot(app_state: Arc<AppState>, runtime: WeixinRuntimeContext) {
     mark_channel_started(&runtime.channel_name);
-    info!(
-        "OpenClaw Weixin adapter '{}' is ready",
-        runtime.channel_name
-    );
+    info!("Weixin adapter '{}' is ready", runtime.channel_name);
 
     let adapter = WeixinAdapter::from_runtime(&runtime);
     match adapter.load_native_account() {
@@ -2086,7 +2080,7 @@ pub async fn start_weixin_bot(app_state: Arc<AppState>, runtime: WeixinRuntimeCo
         }
         Err(err) => {
             warn!(
-                "OpenClaw Weixin '{}' polling disabled until login completes: {}",
+                "Weixin '{}' polling disabled until login completes: {}",
                 runtime.channel_name, err
             );
         }
@@ -2212,7 +2206,7 @@ pub async fn login_via_cli(
     let mut summary = String::new();
     let _ = writeln!(
         summary,
-        "OpenClaw Weixin login succeeded for '{}'.",
+        "Weixin login succeeded for '{}'.",
         runtime.channel_name
     );
     let _ = writeln!(summary, "Local account key: {}", runtime.local_account_key);
@@ -2277,7 +2271,7 @@ pub fn logout_via_cli(config: &Config, account_id: Option<&str>) -> Result<Strin
     let runtime = resolve_weixin_runtime_for_cli(config, account_id, None)?;
     delete_account_data(&runtime.state_root, &runtime.local_account_key)?;
     Ok(format!(
-        "Removed OpenClaw Weixin credentials for '{}'.",
+        "Removed Weixin credentials for '{}'.",
         runtime.channel_name
     ))
 }

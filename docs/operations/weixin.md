@@ -1,4 +1,4 @@
-# OpenClaw Weixin
+# Weixin
 
 MicroClaw now supports Weixin as a native Rust channel. No Node sidecar or `@tencent-weixin/openclaw-weixin` bridge is required for login, polling, text replies, or attachment replies.
 
