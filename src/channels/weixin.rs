@@ -451,6 +451,22 @@ fn parse_csv(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn truncate_for_log(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let normalized = text.replace('\n', "\\n");
+    let mut chars = normalized.chars();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return normalized;
+        };
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
 fn pick_default_account_id(
     configured: Option<&str>,
     accounts: &HashMap<String, WeixinAccountConfig>,
@@ -1839,6 +1855,13 @@ async fn process_weixin_inbound_message(
     } else {
         normalized.message_id.clone()
     };
+    info!(
+        "Weixin: received message chat_id={} message_id={} sender={} text={}",
+        chat_id,
+        inbound_message_id,
+        sender,
+        truncate_for_log(text, 300)
+    );
     let inbound_ts_ms = normalized.timestamp_ms.or_else(|| {
         normalized
             .timestamp
@@ -2589,6 +2612,12 @@ weixin:
         let rendered = render_terminal_qr("https://example.com/qr").unwrap();
         assert!(rendered.contains('█') || rendered.contains('▀') || rendered.contains('▄'));
         assert!(rendered.lines().count() > 5);
+    }
+
+    #[test]
+    fn test_truncate_for_log_normalizes_newlines_and_limits_length() {
+        let preview = truncate_for_log("hello\nworld and beyond", 8);
+        assert_eq!(preview, "hello\\nw...");
     }
 
     #[test]
