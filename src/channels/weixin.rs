@@ -530,7 +530,18 @@ fn candidate_state_roots(state_root: &Path) -> Vec<PathBuf> {
     roots
 }
 
+fn has_native_credentials(account: &StoredWeixinAccount) -> bool {
+    !account.token.trim().is_empty()
+}
+
 fn preferred_state_root(state_root: &Path, local_account_key: &str) -> PathBuf {
+    for root in candidate_state_roots(state_root) {
+        if let Some(account) = load_account_data(&root, local_account_key) {
+            if has_native_credentials(&account) {
+                return root;
+            }
+        }
+    }
     for root in candidate_state_roots(state_root) {
         if account_file_path(&root, local_account_key).exists()
             || sync_buf_file_path(&root, local_account_key).exists()
@@ -624,12 +635,18 @@ fn load_account_data_from_candidates(
     state_root: &Path,
     local_account_key: &str,
 ) -> Option<(PathBuf, StoredWeixinAccount)> {
+    let mut fallback: Option<(PathBuf, StoredWeixinAccount)> = None;
     for root in candidate_state_roots(state_root) {
         if let Some(account) = load_account_data(&root, local_account_key) {
-            return Some((root, account));
+            if has_native_credentials(&account) {
+                return Some((root, account));
+            }
+            if fallback.is_none() {
+                fallback = Some((root, account));
+            }
         }
     }
-    None
+    fallback
 }
 
 fn save_account_data(
