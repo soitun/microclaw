@@ -514,6 +514,17 @@ fn candidate_state_roots(state_root: &Path) -> Vec<PathBuf> {
     roots
 }
 
+fn preferred_state_root(state_root: &Path, local_account_key: &str) -> PathBuf {
+    for root in candidate_state_roots(state_root) {
+        if account_file_path(&root, local_account_key).exists()
+            || sync_buf_file_path(&root, local_account_key).exists()
+        {
+            return root;
+        }
+    }
+    state_root.to_path_buf()
+}
+
 fn account_file_path(state_root: &Path, local_account_key: &str) -> PathBuf {
     state_root
         .join("accounts")
@@ -546,7 +557,9 @@ fn resolve_context_token_from_store(
 }
 
 fn hydrate_context_token_cache(runtime: &WeixinRuntimeContext) {
-    let Some(account) = load_account_data(&runtime.state_root, &runtime.local_account_key) else {
+    let Some((_, account)) =
+        load_account_data_from_candidates(&runtime.state_root, &runtime.local_account_key)
+    else {
         return;
     };
     for (external_chat_id, token) in account.context_tokens {
@@ -565,18 +578,24 @@ fn persist_context_token(
     }
     cache_context_token(&runtime.channel_name, external_chat_id, token);
 
-    let mut account = load_account_data(&runtime.state_root, &runtime.local_account_key)
-        .unwrap_or_else(|| StoredWeixinAccount {
-            base_url: runtime.base_url.clone(),
-            ..StoredWeixinAccount::default()
-        });
+    let (resolved_root, mut account) =
+        load_account_data_from_candidates(&runtime.state_root, &runtime.local_account_key)
+            .unwrap_or_else(|| {
+                (
+                    preferred_state_root(&runtime.state_root, &runtime.local_account_key),
+                    StoredWeixinAccount {
+                        base_url: runtime.base_url.clone(),
+                        ..StoredWeixinAccount::default()
+                    },
+                )
+            });
     account
         .context_tokens
         .insert(external_chat_id.to_string(), token.to_string());
     if account.base_url.trim().is_empty() {
         account.base_url = runtime.base_url.clone();
     }
-    save_account_data(&runtime.state_root, &runtime.local_account_key, &account)
+    save_account_data(&resolved_root, &runtime.local_account_key, &account)
 }
 
 fn load_account_data(state_root: &Path, local_account_key: &str) -> Option<StoredWeixinAccount> {
@@ -619,21 +638,24 @@ fn save_account_data(
 }
 
 fn delete_account_data(state_root: &Path, local_account_key: &str) -> Result<(), String> {
-    let path = account_file_path(state_root, local_account_key);
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("Failed to remove Weixin account state: {e}"))?;
-    }
-    let sync_path = sync_buf_file_path(state_root, local_account_key);
-    if sync_path.exists() {
-        std::fs::remove_file(&sync_path)
-            .map_err(|e| format!("Failed to remove Weixin sync state: {e}"))?;
+    for root in candidate_state_roots(state_root) {
+        let path = account_file_path(&root, local_account_key);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Failed to remove Weixin account state: {e}"))?;
+        }
+        let sync_path = sync_buf_file_path(&root, local_account_key);
+        if sync_path.exists() {
+            std::fs::remove_file(&sync_path)
+                .map_err(|e| format!("Failed to remove Weixin sync state: {e}"))?;
+        }
     }
     Ok(())
 }
 
 fn load_sync_buf(state_root: &Path, local_account_key: &str) -> String {
-    std::fs::read_to_string(sync_buf_file_path(state_root, local_account_key)).unwrap_or_default()
+    let root = preferred_state_root(state_root, local_account_key);
+    std::fs::read_to_string(sync_buf_file_path(&root, local_account_key)).unwrap_or_default()
 }
 
 fn save_sync_buf(
@@ -641,7 +663,8 @@ fn save_sync_buf(
     local_account_key: &str,
     get_updates_buf: &str,
 ) -> Result<(), String> {
-    let path = sync_buf_file_path(state_root, local_account_key);
+    let root = preferred_state_root(state_root, local_account_key);
+    let path = sync_buf_file_path(&root, local_account_key);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create Weixin sync dir: {e}"))?;
@@ -651,7 +674,9 @@ fn save_sync_buf(
 }
 
 fn stored_account_exists(state_root: &Path, local_account_key: &str) -> bool {
-    account_file_path(state_root, local_account_key).exists()
+    candidate_state_roots(state_root)
+        .into_iter()
+        .any(|root| account_file_path(&root, local_account_key).exists())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1643,12 +1668,13 @@ pub struct WeixinAdapter {
 
 impl WeixinAdapter {
     pub fn from_runtime(runtime: &WeixinRuntimeContext) -> Self {
+        let state_root = preferred_state_root(&runtime.state_root, &runtime.local_account_key);
         Self {
             name: runtime.channel_name.clone(),
             local_account_key: runtime.local_account_key.clone(),
             base_url: runtime.base_url.clone(),
             cdn_base_url: runtime.cdn_base_url.clone(),
-            state_root: runtime.state_root.clone(),
+            state_root,
             http_client: reqwest::Client::new(),
         }
     }
@@ -2619,6 +2645,48 @@ weixin:
             .map(|(_, account)| account)
             .unwrap();
         assert_eq!(loaded.token, "bot-token");
+
+        let _ = fs::remove_dir_all(data_root);
+    }
+
+    #[test]
+    fn test_persist_context_token_updates_existing_fallback_account() {
+        let data_root = unique_temp_dir();
+        let primary_root = data_root.join("runtime").join(CHANNEL_KEY);
+        let fallback_root = data_root.join(CHANNEL_KEY);
+        let account = StoredWeixinAccount {
+            token: "bot-token".to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            remote_account_id: "bot@im.bot".to_string(),
+            user_id: "user@im.wechat".to_string(),
+            saved_at: "2026-03-24T00:00:00Z".to_string(),
+            context_tokens: HashMap::new(),
+        };
+        save_account_data(&fallback_root, "default", &account).unwrap();
+
+        let runtime = WeixinRuntimeContext {
+            channel_name: CHANNEL_KEY.to_string(),
+            account_id: String::new(),
+            local_account_key: "default".to_string(),
+            allowed_user_ids: Vec::new(),
+            webhook_token: String::new(),
+            bot_username: "bot".to_string(),
+            model: None,
+            base_url: DEFAULT_BASE_URL.to_string(),
+            cdn_base_url: DEFAULT_CDN_BASE_URL.to_string(),
+            state_root: primary_root,
+        };
+        persist_context_token(&runtime, "alice@im.wechat", "ctx-a").unwrap();
+
+        let stored = load_account_data(&fallback_root, "default").unwrap();
+        assert_eq!(stored.token, "bot-token");
+        assert_eq!(
+            stored
+                .context_tokens
+                .get("alice@im.wechat")
+                .map(String::as_str),
+            Some("ctx-a")
+        );
 
         let _ = fs::remove_dir_all(data_root);
     }
