@@ -752,7 +752,7 @@ fn parse_declared_len(raw: &str) -> Option<u64> {
 
 fn hex_decode(raw: &str) -> Option<Vec<u8>> {
     let trimmed = raw.trim();
-    if trimmed.len() % 2 != 0 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !trimmed.len().is_multiple_of(2) || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     let mut bytes = Vec::with_capacity(trimmed.len() / 2);
