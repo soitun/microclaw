@@ -299,8 +299,8 @@ fn strip_reflector_thinking_tags(input: &str) -> String {
         out
     }
 
-    let no_think = strip_tag(input, "<think>", "</think>");
-    strip_tag(&no_think, "<thought>", "</thought>")
+    let cleaned = crate::agent_engine::strip_thinking(input);
+    strip_tag(&cleaned, "<notepad>", "</notepad>")
 }
 
 fn parse_reflector_json_array(text: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
@@ -707,10 +707,16 @@ mod tests {
 
     #[test]
     fn test_parse_reflector_json_array_strips_thinking_tags() {
-        let raw = "<thought>internal</thought>[{\"content\":\"x\",\"category\":\"KNOWLEDGE\"}]";
+        let raw = "<thinking>plan</thinking><reasoning>private</reasoning><notepad>scratch</notepad>[{\"content\":\"x\",\"category\":\"KNOWLEDGE\"}]";
         let arr = parse_reflector_json_array(raw).expect("should parse");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["content"], "x");
+    }
+
+    #[test]
+    fn test_strip_reflector_thinking_tags_removes_supported_tag_families() {
+        let raw = "<thought>one</thought><think>two</think><thinking>three</thinking><reasoning>four</reasoning><notepad>five</notepad>Visible";
+        assert_eq!(strip_reflector_thinking_tags(raw), "Visible");
     }
 
     #[test]
