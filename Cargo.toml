@@ -11,6 +11,11 @@ members = [
 ]
 resolver = "2"
 
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
 [package]
 name = "microclaw"
 version = "0.1.30"
