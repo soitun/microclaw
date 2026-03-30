@@ -50,12 +50,15 @@ pub async fn serve(
         db.clone(),
         MemoryMcpClient::discover(&mcp_manager),
     ));
-    let mut tools = ToolRegistry::new(
+    let tools = ToolRegistry::new(
         &config,
         channel_registry.clone(),
         db.clone(),
         memory_backend.clone(),
     );
+    #[cfg(feature = "mcp")]
+    let mut tools = tools;
+    #[cfg(feature = "mcp")]
     for (server, tool_info) in mcp_manager.all_tools() {
         tools.add_tool(Box::new(crate::tools::mcp::McpTool::new(server, tool_info)));
     }

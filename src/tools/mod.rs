@@ -6,6 +6,7 @@ pub mod edit_file;
 pub mod export_chat;
 pub mod glob;
 pub mod grep;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod memory;
 pub mod read_file;

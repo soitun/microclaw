@@ -28,8 +28,10 @@ use crate::http_client::llm_user_agent;
 use microclaw_core::error::MicroClawError;
 use microclaw_core::text::floor_char_boundary;
 
+#[cfg(feature = "channel-matrix")]
+use crate::channels::matrix;
 use crate::channels::{
-    dingtalk, email, feishu, imessage, irc, matrix, nostr, qq, signal, slack, weixin, whatsapp,
+    dingtalk, email, feishu, imessage, irc, nostr, qq, signal, slack, weixin, whatsapp,
 };
 use crate::setup_def::{ChannelFieldDef, DynamicChannelDef};
 
@@ -38,6 +40,7 @@ const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
     slack::SETUP_DEF,
     feishu::SETUP_DEF,
     irc::SETUP_DEF,
+    #[cfg(feature = "channel-matrix")]
     matrix::SETUP_DEF,
     whatsapp::SETUP_DEF,
     imessage::SETUP_DEF,
@@ -2069,8 +2072,9 @@ impl SetupApp {
 
         if let Some(path) = yaml_path {
             if let Ok(content) = fs::read_to_string(path) {
-                let explicit_enabled_channels =
-                    serde_yaml::from_str::<serde_yaml::Value>(&content).ok().and_then(|doc| {
+                let explicit_enabled_channels = serde_yaml::from_str::<serde_yaml::Value>(&content)
+                    .ok()
+                    .and_then(|doc| {
                         let channels = doc.get("channels")?.as_mapping()?;
                         let mut enabled = Vec::new();
                         for channel in Self::channel_options() {
@@ -2078,8 +2082,7 @@ impl SetupApp {
                                 .get(serde_yaml::Value::String(channel.to_string()))
                                 .and_then(|v| v.as_mapping())
                                 .and_then(|mapping| {
-                                    mapping
-                                        .get(serde_yaml::Value::String("enabled".to_string()))
+                                    mapping.get(serde_yaml::Value::String("enabled".to_string()))
                                 })
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);

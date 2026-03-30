@@ -10,10 +10,12 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::channels::dingtalk::{build_dingtalk_runtime_contexts, DingTalkRuntimeContext};
+#[cfg(feature = "channel-discord")]
 use crate::channels::discord::{build_discord_runtime_contexts, DiscordRuntimeContext};
 use crate::channels::email::{build_email_runtime_contexts, EmailRuntimeContext};
 use crate::channels::feishu::{build_feishu_runtime_contexts, FeishuRuntimeContext};
 use crate::channels::imessage::{build_imessage_runtime_contexts, IMessageRuntimeContext};
+#[cfg(feature = "channel-matrix")]
 use crate::channels::matrix::{build_matrix_runtime_contexts, MatrixRuntimeContext};
 use crate::channels::nostr::{build_nostr_runtime_contexts, NostrRuntimeContext};
 use crate::channels::qq::{build_qq_runtime_contexts, QQRuntimeContext};
@@ -24,10 +26,13 @@ use crate::channels::telegram::{
 };
 use crate::channels::weixin::{build_weixin_runtime_contexts, WeixinRuntimeContext};
 use crate::channels::whatsapp::{build_whatsapp_runtime_contexts, WhatsAppRuntimeContext};
+#[cfg(feature = "channel-discord")]
+use crate::channels::DiscordAdapter;
+#[cfg(feature = "channel-matrix")]
+use crate::channels::MatrixAdapter;
 use crate::channels::{
-    DingTalkAdapter, DiscordAdapter, EmailAdapter, FeishuAdapter, IMessageAdapter, IrcAdapter,
-    MatrixAdapter, NostrAdapter, QQAdapter, SignalAdapter, SlackAdapter, TelegramAdapter,
-    WeixinAdapter, WhatsAppAdapter,
+    DingTalkAdapter, EmailAdapter, FeishuAdapter, IMessageAdapter, IrcAdapter, NostrAdapter,
+    QQAdapter, SignalAdapter, SlackAdapter, TelegramAdapter, WeixinAdapter, WhatsAppAdapter,
 };
 use crate::config::normalize_model_name;
 use crate::config::Config;
@@ -44,6 +49,16 @@ use microclaw_observability::logs::OtlpLogExporter;
 use microclaw_observability::metrics::OtlpMetricExporter;
 use microclaw_observability::traces::OtlpTraceExporter;
 use microclaw_storage::db::Database;
+
+#[cfg(any(not(feature = "channel-discord"), not(feature = "channel-matrix")))]
+fn warn_missing_feature(config: &Config, channel_key: &str, feature_name: &str) {
+    if config.channel_enabled(channel_key) {
+        warn!(
+            "Channel '{}' is enabled in config, but this binary was built without the '{}' feature",
+            channel_key, feature_name
+        );
+    }
+}
 
 pub struct AppState {
     pub config: Config,
@@ -162,6 +177,7 @@ pub async fn run(
     let mut registry = ChannelRegistry::new();
     let mut telegram_runtimes: Vec<(teloxide::Bot, TelegramRuntimeContext)> = Vec::new();
     let mut llm_model_overrides: HashMap<String, String> = HashMap::new();
+    #[cfg(feature = "channel-discord")]
     let discord_runtimes: Vec<(String, DiscordRuntimeContext)> = prepare_channel_runtimes(
         &config,
         "discord",
@@ -182,6 +198,8 @@ pub async fn run(
                 .map(|model| (runtime.1.channel_name.clone(), model))
         },
     );
+    #[cfg(not(feature = "channel-discord"))]
+    warn_missing_feature(&config, "discord", "channel-discord");
     let slack_runtimes: Vec<SlackRuntimeContext> = prepare_channel_runtimes(
         &config,
         "slack",
@@ -222,6 +240,7 @@ pub async fn run(
                 .map(|model| (runtime.channel_name.clone(), model))
         },
     );
+    #[cfg(feature = "channel-matrix")]
     let matrix_runtimes: Vec<MatrixRuntimeContext> = prepare_channel_runtimes(
         &config,
         "matrix",
@@ -237,6 +256,8 @@ pub async fn run(
         },
         |_| None,
     );
+    #[cfg(not(feature = "channel-matrix"))]
+    warn_missing_feature(&config, "matrix", "channel-matrix");
     let whatsapp_runtimes: Vec<WhatsAppRuntimeContext> = prepare_channel_runtimes(
         &config,
         "whatsapp",
@@ -443,13 +464,16 @@ pub async fn run(
         db.clone(),
         crate::memory_backend::MemoryMcpClient::discover(&mcp_manager),
     ));
-    let mut tools = ToolRegistry::new(
+    let tools = ToolRegistry::new(
         &config,
         channel_registry.clone(),
         db.clone(),
         memory_backend.clone(),
     );
+    #[cfg(feature = "mcp")]
+    let mut tools = tools;
 
+    #[cfg(feature = "mcp")]
     for (server, tool_info) in mcp_manager.all_tools() {
         tools.add_tool(Box::new(crate::tools::mcp::McpTool::new(server, tool_info)));
     }
@@ -525,7 +549,11 @@ pub async fn run(
         });
     }
 
+    #[cfg(feature = "channel-discord")]
     let has_discord = !discord_runtimes.is_empty();
+    #[cfg(not(feature = "channel-discord"))]
+    let has_discord = false;
+    #[cfg(feature = "channel-discord")]
     if has_discord {
         spawn_channel_runtimes(
             state.clone(),
@@ -570,7 +598,11 @@ pub async fn run(
         );
     }
 
+    #[cfg(feature = "channel-matrix")]
     let has_matrix = !matrix_runtimes.is_empty();
+    #[cfg(not(feature = "channel-matrix"))]
+    let has_matrix = false;
+    #[cfg(feature = "channel-matrix")]
     if has_matrix {
         spawn_channel_runtimes(
             state.clone(),
