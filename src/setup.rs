@@ -2069,8 +2069,9 @@ impl SetupApp {
 
         if let Some(path) = yaml_path {
             if let Ok(content) = fs::read_to_string(path) {
-                let explicit_enabled_channels =
-                    serde_yaml::from_str::<serde_yaml::Value>(&content).ok().and_then(|doc| {
+                let explicit_enabled_channels = serde_yaml::from_str::<serde_yaml::Value>(&content)
+                    .ok()
+                    .and_then(|doc| {
                         let channels = doc.get("channels")?.as_mapping()?;
                         let mut enabled = Vec::new();
                         for channel in Self::channel_options() {
@@ -2078,8 +2079,7 @@ impl SetupApp {
                                 .get(serde_yaml::Value::String(channel.to_string()))
                                 .and_then(|v| v.as_mapping())
                                 .and_then(|mapping| {
-                                    mapping
-                                        .get(serde_yaml::Value::String("enabled".to_string()))
+                                    mapping.get(serde_yaml::Value::String("enabled".to_string()))
                                 })
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);

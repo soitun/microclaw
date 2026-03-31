@@ -466,11 +466,13 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
     // Strip thinking tags from message content so they don't confuse the LLM's JSON output
     let conversation = messages
         .iter()
-        .map(|m| format!(
-            "[{}]: {}",
-            m.sender_name,
-            strip_reflector_thinking_tags(&m.content)
-        ))
+        .map(|m| {
+            format!(
+                "[{}]: {}",
+                m.sender_name,
+                strip_reflector_thinking_tags(&m.content)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
