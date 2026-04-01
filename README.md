@@ -728,6 +728,14 @@ curl -N "http://127.0.0.1:10961/api/stream?run_id=<RUN_ID>" \
   -H "Authorization: Bearer $MICROCLAW_API_KEY"
 ```
 
+Concurrency note:
+
+- one run is still sequential through the shared agent loop
+- the runtime is not one global blocking session
+- web streamed runs, scheduler jobs, reflector passes, and session-native subagents already execute on separate async lanes
+
+See [docs/operations/concurrency-and-responsiveness.md](docs/operations/concurrency-and-responsiveness.md) for the current model, limits, and practical tuning guidance.
+
 Mission Control / OpenClaw-style WebSocket bridge:
 
 1. Connect to `ws://127.0.0.1:10961/`
@@ -1522,6 +1530,7 @@ export no_proxy=127.0.0.1,localhost,<your-langfuse-host>
 | [SUPPORT.md](SUPPORT.md) | Operator support and compatibility expectations |
 | [CHANGELOG.md](CHANGELOG.md) | Release-oriented change log |
 | [docs/operations/acp-stdio.md](docs/operations/acp-stdio.md) | ACP stdio mode overview and verification steps |
+| [docs/operations/concurrency-and-responsiveness.md](docs/operations/concurrency-and-responsiveness.md) | Current non-blocking execution model, limits, and tuning guidance |
 | [docs/operations/http-hook-trigger.md](docs/operations/http-hook-trigger.md) | Webhook and async streaming trigger behavior |
 | [docs/releases/release-policy.md](docs/releases/release-policy.md) | Release targets, gates, and rollback standard |
 | [CLAUDE.md](CLAUDE.md) | Project context for AI coding assistants |
