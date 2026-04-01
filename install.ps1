@@ -1,12 +1,14 @@
 param(
   [string]$Repo = $(if ($env:MICROCLAW_REPO) { $env:MICROCLAW_REPO } else { 'microclaw/microclaw' }),
   [string]$InstallDir = $(if ($env:MICROCLAW_INSTALL_DIR) { $env:MICROCLAW_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }),
+  [switch]$Full,
   [switch]$SkipRun,
   [int]$WaitForPid = 0
 )
 
 $ErrorActionPreference = 'Stop'
 $BinName = 'microclaw.exe'
+$Variant = if ($Full.IsPresent -or $env:MICROCLAW_VARIANT -eq 'full') { 'full' } else { 'default' }
 $ApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
 $skipRunFromEnv = $false
 if ($env:MICROCLAW_INSTALL_SKIP_RUN) {
@@ -27,10 +29,15 @@ function Resolve-Arch {
   }
 }
 
-function Select-AssetUrl([object]$release, [string]$arch) {
+function Select-AssetUrl([object]$release, [string]$arch, [string]$variant) {
+  if ($variant -eq 'full') {
+    $prefix = 'microclaw-full'
+  } else {
+    $prefix = 'microclaw'
+  }
   $patterns = @(
-    "microclaw-[0-9]+\.[0-9]+\.[0-9]+-$arch-windows-msvc\.zip$",
-    "microclaw-[0-9]+\.[0-9]+\.[0-9]+-.*$arch.*windows.*\.zip$"
+    "$prefix-[0-9]+\.[0-9]+\.[0-9]+-$arch-windows-msvc\.zip$",
+    "$prefix-[0-9]+\.[0-9]+\.[0-9]+-.*$arch.*windows.*\.zip$"
   )
 
   foreach ($p in $patterns) {
@@ -93,10 +100,14 @@ function Wait-ForProcessExit([int]$pid) {
 }
 
 $arch = Resolve-Arch
-Write-Info "Installing microclaw for windows/$arch..."
+if ($Variant -eq 'full') {
+  Write-Info "Installing microclaw (full variant) for windows/$arch..."
+} else {
+  Write-Info "Installing microclaw for windows/$arch..."
+}
 
 $release = Invoke-RestMethod -Uri $ApiUrl -Headers @{ 'User-Agent' = 'microclaw-install-script' }
-$assetUrl = Select-AssetUrl -release $release -arch $arch
+$assetUrl = Select-AssetUrl -release $release -arch $arch -variant $Variant
 if (-not $assetUrl) {
   throw "No prebuilt binary found for windows/$arch in the latest GitHub release."
 }
@@ -109,7 +120,11 @@ try {
   Invoke-WebRequest -Uri $assetUrl -OutFile $archivePath
 
   Expand-Archive -Path $archivePath -DestinationPath $tmpDir.FullName -Force
-  $bin = Get-ChildItem -Path $tmpDir.FullName -Filter $BinName -Recurse | Select-Object -First 1
+  # Full variant archives contain "microclaw-full.exe"; fall back to "microclaw.exe".
+  $bin = Get-ChildItem -Path $tmpDir.FullName -Filter 'microclaw-full.exe' -Recurse | Select-Object -First 1
+  if (-not $bin) {
+    $bin = Get-ChildItem -Path $tmpDir.FullName -Filter $BinName -Recurse | Select-Object -First 1
+  }
   if (-not $bin) {
     throw "Could not find $BinName in archive"
   }

@@ -108,6 +108,12 @@ curl -fsSL https://microclaw.ai/install.sh | bash -s -- --full
 iwr https://microclaw.ai/install.ps1 -UseBasicParsing | iex
 ```
 
+For the full variant on Windows:
+
+```powershell
+& ([scriptblock]::Create((iwr https://microclaw.ai/install.ps1 -UseBasicParsing).Content)) -Full
+```
+
 This installer only does one thing:
 - Download and install the matching prebuilt binary from the latest GitHub release
 - It does not fallback to Homebrew/Cargo inside `install.sh` (use separate methods below)
