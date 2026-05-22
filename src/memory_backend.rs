@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::mcp::{McpManager, McpServer, McpToolInfo};
 use microclaw_core::error::MicroClawError;
+use microclaw_core::text::floor_char_boundary;
 use microclaw_storage::db::{call_blocking, Database, Memory};
 
 #[derive(Clone)]
@@ -356,7 +357,7 @@ impl MemoryBackend {
                     "source": source,
                     "confidence": confidence,
                     "content_len": content.len(),
-                    "content_preview": &content[..content.len().min(100)],
+                    "content_preview": &content[..floor_char_boundary(content, 100)],
                     "ts": chrono::Utc::now().to_rfc3339(),
                 }),
             );
