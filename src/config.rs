@@ -423,6 +423,10 @@ pub struct MediaConfig {
     pub tts: TtsConfig,
     #[serde(default)]
     pub stt: SttConfig,
+    #[serde(default)]
+    pub book: BookConfig,
+    #[serde(default)]
+    pub podcast: PodcastConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -475,6 +479,14 @@ pub struct TtsConfig {
     pub default_voice: String,
     #[serde(default = "default_tts_format")]
     pub default_format: String,
+    /// Optional TTS-specific endpoint override, e.g. a dedicated speech host.
+    /// Falls back to `media.base_url`, then `openai_base_url`, then OpenAI.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Optional TTS-specific API key. Falls back to `media.api_key`, then
+    /// `MICROCLAW_OPENAI_API_KEY` / `OPENAI_API_KEY` / `openai_api_key`.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl Default for TtsConfig {
@@ -484,6 +496,8 @@ impl Default for TtsConfig {
             model: default_tts_model(),
             default_voice: default_tts_voice(),
             default_format: default_tts_format(),
+            base_url: None,
+            api_key: None,
         }
     }
 }
@@ -504,6 +518,79 @@ impl Default for SttConfig {
             enabled: false,
             model: default_stt_model(),
             language: None,
+        }
+    }
+}
+
+/// Configuration for the native `render_pdf` ("generate a book") tool.
+///
+/// Disabled by default — operators opt in via `media.book.enabled`. PDF
+/// rendering is fully self-contained (pure-Rust `genpdf`), so no external
+/// binaries are required.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Page size for rendered documents. Currently "A4" or "Letter".
+    #[serde(default = "default_book_page_size")]
+    pub page_size: String,
+    /// Path to a single-face TrueType (`.ttf`) font used to render text.
+    /// When unset, a usable system font is auto-detected (e.g. Arial Unicode
+    /// on macOS, DejaVu/Liberation on Linux). For CJK output, point this at a
+    /// CJK-capable TrueType font.
+    #[serde(default)]
+    pub font_path: Option<String>,
+}
+
+impl Default for BookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            page_size: default_book_page_size(),
+            font_path: None,
+        }
+    }
+}
+
+/// Configuration for the native `generate_podcast` tool.
+///
+/// Disabled by default — operators opt in via `media.podcast.enabled`.
+/// Per-segment speech uses the OpenAI-compatible `/audio/speech` endpoint with
+/// the `media.tts` model; credentials/endpoint default to `media.tts` then the
+/// shared `media` settings, but can be overridden here. Segments are stitched
+/// into a single file by shelling out to `ffmpeg`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PodcastConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to (or name of) the `ffmpeg` binary used to concatenate segments.
+    #[serde(default = "default_ffmpeg_path")]
+    pub ffmpeg_path: String,
+    /// Default voice when a segment does not specify one.
+    #[serde(default = "default_tts_voice")]
+    pub default_voice: String,
+    /// Silence inserted between segments, in milliseconds.
+    #[serde(default = "default_segment_pause_ms")]
+    pub segment_pause_ms: u32,
+    /// Optional podcast-specific endpoint override. Falls back to
+    /// `media.tts.base_url`, then `media.base_url`, then `openai_base_url`.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Optional podcast-specific API key. Falls back to `media.tts.api_key`,
+    /// then `media.api_key` / `MICROCLAW_OPENAI_API_KEY` / `OPENAI_API_KEY`.
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl Default for PodcastConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ffmpeg_path: default_ffmpeg_path(),
+            default_voice: default_tts_voice(),
+            segment_pause_ms: default_segment_pause_ms(),
+            base_url: None,
+            api_key: None,
         }
     }
 }
@@ -531,6 +618,15 @@ fn default_tts_format() -> String {
 }
 fn default_stt_model() -> String {
     "whisper-1".into()
+}
+fn default_book_page_size() -> String {
+    "A4".into()
+}
+fn default_ffmpeg_path() -> String {
+    "ffmpeg".into()
+}
+fn default_segment_pause_ms() -> u32 {
+    500
 }
 
 impl MediaConfig {

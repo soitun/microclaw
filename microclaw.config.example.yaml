@@ -345,3 +345,36 @@ web_session_idle_ttl_seconds: 300
 #   enabled: false
 #   min_interval_secs: 900         # at most one unprompted interjection per chat per this window
 #   lookback_mins: 10              # only consider chats with user messages this recent
+
+# Multimedia tools. All OFF by default. Credentials are shared via media.api_key
+# / media.base_url (falling back to MICROCLAW_OPENAI_API_KEY, OPENAI_API_KEY, or
+# top-level openai_api_key / openai_base_url). Individual tools may override the
+# endpoint + key (e.g. point TTS at a dedicated speech provider). Enable only the
+# tools you want the bot to use.
+# media:
+#   # api_key: ""                  # shared key for all media tools (below)
+#   # base_url: ""                 # shared OpenAI-compatible endpoint (default api.openai.com/v1)
+#   image_gen:
+#     enabled: false               # generate_image tool
+#   tts:
+#     enabled: false               # text_to_speech tool (also required by podcast)
+#     model: tts-1
+#     default_voice: alloy
+#     # base_url: ""               # TTS-specific endpoint override (falls back to media.base_url)
+#     # api_key: ""                # TTS-specific key override (falls back to media.api_key)
+#   # Generate a book → PDF (render_pdf tool). Pure-Rust, self-contained, no
+#   # external binaries. For CJK (Chinese/Japanese/Korean) output, point
+#   # font_path at a single-face TrueType (.ttf) CJK font.
+#   book:
+#     enabled: false
+#     page_size: A4                # A4 or Letter
+#     # font_path: /System/Library/Fonts/Supplemental/Arial Unicode.ttf
+#   # Generate a podcast episode (generate_podcast tool). Needs media.tts enabled
+#   # and an ffmpeg binary on PATH (or set ffmpeg_path).
+#   podcast:
+#     enabled: false
+#     ffmpeg_path: ffmpeg
+#     default_voice: alloy
+#     segment_pause_ms: 500        # silence inserted between segments
+#     # base_url: ""               # podcast-specific endpoint (falls back to media.tts.base_url)
+#     # api_key: ""                # podcast-specific key (falls back to media.tts.api_key)
