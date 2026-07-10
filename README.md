@@ -3,6 +3,10 @@
 
 [English](README.md) | [中文](README_CN.md)
 
+> [!IMPORTANT]
+> **Looking for a stable version? Use the [`stable`](https://github.com/microclaw/microclaw/tree/stable) branch.**
+> The `main` branch is under very active and aggressive development — expect rapid changes.
+
 [![Website](https://img.shields.io/badge/Website-microclaw.org-blue)](https://microclaw.org)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pvmezwkAk5)
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Fmicroclaw-FF4500?logo=reddit&logoColor=white)](https://www.reddit.com/r/microclaw/)
@@ -357,7 +361,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `cancel_scheduled_task` | Cancel a task permanently |
 | `get_task_history` | View execution history for a scheduled task |
 | `export_chat` | Export chat history to markdown |
-| `sessions_spawn` | Spawn an asynchronous sub-agent run and return immediately |
+| `sessions_spawn` | Spawn an asynchronous sub-agent run and return immediately; optional `exit_criteria` completion contract is verified with real checks when the run finishes ([docs](docs/completion-contracts.md)) |
 | `subagents_list` | List sub-agent runs for the current chat |
 | `subagents_info` | Inspect one sub-agent run in detail |
 | `subagents_kill` | Cancel one run or all active runs in the current chat |
