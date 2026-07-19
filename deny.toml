@@ -25,6 +25,10 @@ yanked = "deny"
 #   typst render stack (fontdb/rustybuzz/usvg); upstream suggests migrating to
 #   `skrifa`, which typst has not done yet. No safe upgrade available.
 #
+# RUSTSEC-2026-0206: `rustybuzz` is unmaintained and transitive in typst 0.15
+#   via krilla/usvg. Upstream recommends harfrust, but typst has no compatible
+#   release using it yet. Remove this exception when the typst stack migrates.
+#
 # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: `quick-xml` 0.38/0.39 DoS advisories
 #   (quadratic dup-attribute check; unbounded NsReader allocation). Both copies
 #   are transitive in the typst render stack (citationberg -> hayagriva, and
@@ -45,6 +49,7 @@ ignore = [
   "RUSTSEC-2026-0194",
   "RUSTSEC-2026-0195",
   "RUSTSEC-2026-0192",
+  "RUSTSEC-2026-0206",
 ]
 
 [bans]

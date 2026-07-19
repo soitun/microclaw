@@ -104,7 +104,10 @@ impl Tool for ReportProgressTool {
 
         // Progress is always recorded on the run timeline (so subagents_list /
         // standup can show it); delivery to chat is what the toggle controls.
-        if !self.config.subagents.progress_reports {
+        if !self.config.subagents.progress_reports
+            || auth.caller_channel == "weixin"
+            || auth.caller_channel.starts_with("weixin.")
+        {
             return ToolResult::success(
                 json!({"status": "recorded", "delivered": false, "reason": "disabled"}).to_string(),
             );

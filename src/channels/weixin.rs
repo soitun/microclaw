@@ -1952,18 +1952,51 @@ impl ChannelAdapter for WeixinAdapter {
         let account = self.load_native_account()?;
         // The ilink sendmessage API truncates over-long text items, so split
         // long replies into multiple messages like the other channel adapters.
-        for chunk in split_text(text, WEIXIN_TEXT_MAX_LEN) {
+        let chunks = split_text(text, WEIXIN_TEXT_MAX_LEN);
+        let total_chunks = chunks.len();
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
             if chunk.is_empty() {
                 continue;
             }
-            send_text_message_native(
-                &self.http_client,
-                &account,
-                external_chat_id,
-                &chunk,
-                &context_token,
-            )
-            .await?;
+            let mut last_error = None;
+            for attempt in 1..=3 {
+                match send_text_message_native(
+                    &self.http_client,
+                    &account,
+                    external_chat_id,
+                    &chunk,
+                    &context_token,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        last_error = None;
+                        break;
+                    }
+                    Err(err) => {
+                        last_error = Some(err);
+                        if attempt < 3 {
+                            tokio::time::sleep(Duration::from_millis(
+                                RETRY_DELAY_MS * attempt as u64,
+                            ))
+                            .await;
+                        }
+                    }
+                }
+            }
+            if let Some(err) = last_error {
+                return Err(format!(
+                    "Weixin text chunk {}/{} failed after 3 attempts: {}",
+                    chunk_index + 1,
+                    total_chunks,
+                    err
+                ));
+            }
+            // Avoid bursting several sendmessage calls back-to-back; ilink may
+            // accept the first item and silently drop later items under load.
+            if chunk_index + 1 < total_chunks {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
         }
         Ok(())
     }

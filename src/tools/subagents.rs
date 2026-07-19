@@ -148,7 +148,7 @@ fn submit_result_tool_definition() -> ToolDefinition {
 /// re-ask in the sub-agent loop before falling back to best-effort
 /// normalization.
 pub(crate) fn subagent_output_is_structured(raw_text: &str) -> bool {
-    let cleaned = crate::agent_engine::strip_thinking(raw_text);
+    let cleaned = crate::agent_engine::sanitize_user_visible_text(raw_text);
     let text = cleaned.trim();
     let parsed = serde_json::from_str::<serde_json::Value>(text)
         .ok()
@@ -179,7 +179,7 @@ pub(crate) fn normalize_subagent_artifact_payload(raw_text: &str) -> (String, St
     // Strip any chain-of-thought the model emitted so it never leaks into the
     // chat announcement, and so a JSON object that follows a <think> block can
     // still be parsed (a leading reasoning block makes a whole-string parse fail).
-    let cleaned = crate::agent_engine::strip_thinking(raw_text);
+    let cleaned = crate::agent_engine::sanitize_user_visible_text(raw_text);
     let text = cleaned.trim();
     // Prefer a clean whole-string parse; otherwise recover an embedded {...}
     // object (model wrapped the JSON in prose) so we don't fall back to dumping
@@ -1069,7 +1069,8 @@ async fn build_announce_payload(
         text.push_str(&format!("\nerror: {err}"));
     }
     if let Some(result) = &run.result_text {
-        let clipped: String = result.chars().take(2400).collect();
+        let visible = crate::agent_engine::sanitize_user_visible_text(result);
+        let clipped: String = visible.chars().take(1200).collect();
         text.push_str("\nresult:\n");
         text.push_str(&clipped);
     }
@@ -1580,7 +1581,10 @@ impl Tool for SessionsSpawnTool {
 
             runtime.remove_run(&run_id_async);
 
-            if cfg.subagents.announce_to_chat {
+            let user_chat_announces_enabled = cfg.subagents.announce_to_chat
+                && auth.caller_channel != "weixin"
+                && !auth.caller_channel.starts_with("weixin.");
+            if user_chat_announces_enabled {
                 match build_announce_payload(db.clone(), chat_id, &run_id_async).await {
                     Ok(payload) => {
                         let rid = run_id_async.clone();
@@ -1601,7 +1605,7 @@ impl Tool for SessionsSpawnTool {
 
             // Fan-in: when this was the last active child of a parent run, post one
             // consolidated summary of the whole batch (opt-in).
-            if cfg.subagents.fan_in_summary {
+            if user_chat_announces_enabled && cfg.subagents.fan_in_summary {
                 if let Some(parent_id) = parent_run_id_async.as_ref() {
                     maybe_post_fan_in_summary(
                         &cfg,

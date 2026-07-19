@@ -115,7 +115,44 @@ async fn deliver_scheduler_message_with_backoff(
                 );
                 tokio::time::sleep(delay).await;
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                // The scheduled work already completed, so do not drop its
+                // result merely because the channel is temporarily unavailable.
+                // Hand it to the supervised outbox for durable redelivery.
+                let channel = get_chat_routing(
+                    &state.channel_registry,
+                    state.db.clone(),
+                    chat_id,
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|routing| routing.channel_name);
+                if let Some(channel) = channel {
+                    let payload = text.to_string();
+                    let channel_for_queue = channel.clone();
+                    match call_blocking(state.db.clone(), move |db| {
+                        db.enqueue_outbox_message(chat_id, &channel_for_queue, &payload)
+                            .map(|_| ())
+                    })
+                    .await
+                    {
+                        Ok(()) => {
+                            warn!(
+                                "Scheduler: queued failed delivery for chat {} via {} in outbox: {}",
+                                chat_id, channel, err
+                            );
+                            return Ok(());
+                        }
+                        Err(queue_err) => {
+                            return Err(format!(
+                                "{err}; also failed to enqueue scheduler result: {queue_err}"
+                            ));
+                        }
+                    }
+                }
+                return Err(err);
+            }
         }
     }
 }

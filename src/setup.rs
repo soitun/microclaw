@@ -6433,7 +6433,7 @@ fn save_config_yaml(
         subagents_run_timeout_secs_key(),
         900,
     )?;
-    let subagents_announce_to_chat = parse_boolish(&get(subagents_announce_to_chat_key()), true)?;
+    let subagents_announce_to_chat = parse_boolish(&get(subagents_announce_to_chat_key()), false)?;
     let subagents_max_spawn_depth = parse_usize_or_default(
         get_with_fallback(subagents_max_spawn_depth_key(), "1"),
         subagents_max_spawn_depth_key(),

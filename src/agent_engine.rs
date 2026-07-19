@@ -1392,9 +1392,11 @@ async fn process_with_agent_logic(
             }
 
             // Always compute visible text without thinking tags for retry/fallback decisions.
-            let visible_text = strip_thinking(&text);
+            let visible_text = sanitize_user_visible_text(&text);
             // Keep raw thinking text only when show_thinking is enabled.
-            let display_text = if effective_profile.show_thinking {
+            let is_weixin_channel = context.caller_channel == "weixin"
+                || context.caller_channel.starts_with("weixin.");
+            let display_text = if effective_profile.show_thinking && !is_weixin_channel {
                 text.clone()
             } else {
                 visible_text.clone()
@@ -2506,6 +2508,22 @@ pub(crate) fn strip_thinking(text: &str) -> String {
     no_reasoning.trim().to_string()
 }
 
+/// Remove model/runtime protocol artifacts that must never be rendered as
+/// ordinary user-facing text. Real tool calls travel as structured content;
+/// a textual `[tool_use: ...]` line is therefore always an implementation leak.
+pub(crate) fn sanitize_user_visible_text(text: &str) -> String {
+    strip_thinking(text)
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !(trimmed.starts_with("[tool_use:") && trimmed.ends_with(']'))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Extract text content from a Message for summarization/display.
 pub(crate) fn message_to_text(msg: &Message) -> String {
     match &msg.content {
@@ -3404,6 +3422,23 @@ mod tests {
     fn test_strip_thinking_removes_thinking_and_reasoning_tags() {
         let text = "<thinking>plan</thinking>\n<reasoning>private</reasoning>\nVisible";
         assert_eq!(strip_thinking(text), "Visible");
+    }
+
+    #[test]
+    fn test_sanitize_user_visible_text_removes_protocol_artifacts() {
+        let text = "<think>private</think>\nAnswer one.\n\n[tool_use: read_memory({\"chat_id\":1})]\nAnswer two.";
+        assert_eq!(
+            sanitize_user_visible_text(text),
+            "Answer one.\n\nAnswer two."
+        );
+    }
+
+    #[test]
+    fn test_sanitize_user_visible_text_keeps_normal_bracketed_text() {
+        assert_eq!(
+            sanitize_user_visible_text("[note] visible\nUse [tool_use] as a label."),
+            "[note] visible\nUse [tool_use] as a label."
+        );
     }
 
     #[test]

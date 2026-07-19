@@ -189,7 +189,7 @@ subagents:
   max_concurrent: 4
   max_active_per_chat: 3
   run_timeout_secs: 600
-  announce_to_chat: true
+  announce_to_chat: false
   announce_relay_interval_secs: 5
   # —— 新增：进度汇报 ——
   progress:

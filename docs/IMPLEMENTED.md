@@ -96,7 +96,7 @@ subagents:
 
 | 项 | 状态 | 实现 / 位置 |
 |---|---|---|
-| 进度汇报可关 | ✅ | `subagents.progress_reports`（默认 true）。关闭后仍记录到时间线，仅不推送到聊天。`src/tools/report_progress.rs` |
+| 进度汇报可关 | ✅ | `subagents.progress_reports`（默认 false；微信始终不推送内部进度）。关闭后仍记录到时间线，仅不推送到聊天。`src/tools/report_progress.rs` |
 | 关系纵深（认识多久） | ✅ | `src/relationship.rs`：按消息量判定"很新/很熟"，注入 `# Relationship` 提示（中间不注入）。`db.count_messages_for_chat` |
 | 任务 ETA | ✅ | standup 用历史平均完成时长给"~还要 Xm"。`db.avg_completed_subagent_duration_secs` |
 | 专家间协作 / Inner Thoughts / 自发幽默 / 人格成长 | ⏳ | 仍属开放研究问题，见 `how-to-be-a-human.md` |

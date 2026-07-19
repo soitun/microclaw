@@ -81,7 +81,7 @@ subagents:
   max_concurrent: 4
   max_active_per_chat: 5
   run_timeout_secs: 900
-  announce_to_chat: true
+  announce_to_chat: false
 ```
 
 ## Why This Is Practical
