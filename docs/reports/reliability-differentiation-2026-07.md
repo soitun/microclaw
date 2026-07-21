@@ -17,6 +17,7 @@ The product promise is: once a reply is accepted for outbound delivery, MicroCla
 5. Scheduled execution and outbound delivery have separate durable states, so a completed task is not mistaken for a delivered message.
 6. Shared outbound sanitization removes recognizable reasoning and tool-trace wrappers before text reaches a channel adapter.
 7. `microclaw doctor delivery` reports unfinished, retrying, and terminally failed deliveries without modifying runtime state.
+8. The shared CI and nightly stability smoke gate explicitly runs the delivery sanitizer, UTF-8 splitting, byte-preservation, restart-resume, idempotency, and exactly-once logical persistence tests.
 
 ## Point-in-time validation
 
@@ -43,3 +44,9 @@ Handset display remains a human acceptance check because server-side acknowledge
 Do not yet claim that MicroClaw is universally “more reliable than ZeroClaw” or any other project. A defensible comparative claim needs the same failure-injection suite, channel, payloads, retry window, and release versions across projects.
 
 The next useful benchmark is a repeatable reliability scorecard covering process termination, network timeout, rate limiting, duplicate acknowledgement, malformed model wrappers, and payloads above each channel's native limit. Publish pass/fail evidence and recovery time rather than a subjective feature count.
+
+The in-repository baseline can be run with:
+
+```sh
+scripts/ci/stability_smoke.sh
+```
