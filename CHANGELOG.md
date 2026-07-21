@@ -19,6 +19,8 @@ The format is loosely based on Keep a Changelog. Dates use UTC.
 - **`microclaw doctor delivery`.** A read-only diagnostic now reports durable-ledger totals,
   unfinished chunks, retry state, oldest unfinished work, and terminal delivery failures without
   sending a test message or exposing credentials.
+- Long channel replies now preserve newline bytes at chunk boundaries, so concatenating delivered
+  chunks reconstructs the sanitized logical reply exactly instead of losing one newline per split.
 
 - **Output guardrail (credential leak protection).** A new `output_guardrail` config block
   (`mode: off | redact | block`, default **off**) scans outbound bot messages for credential-like

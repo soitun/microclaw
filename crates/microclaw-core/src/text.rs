@@ -23,13 +23,13 @@ pub fn split_text(text: &str, max_len: usize) -> Vec<String> {
             remaining.len()
         } else {
             let boundary = floor_char_boundary(remaining, max_len.min(remaining.len()));
-            remaining[..boundary].rfind('\n').unwrap_or(boundary)
+            remaining[..boundary]
+                .rfind('\n')
+                .map(|index| index + '\n'.len_utf8())
+                .unwrap_or(boundary)
         };
         chunks.push(remaining[..chunk_len].to_string());
         remaining = &remaining[chunk_len..];
-        if remaining.starts_with('\n') {
-            remaining = &remaining[1..];
-        }
     }
     chunks
 }
@@ -90,5 +90,13 @@ mod tests {
     fn split_text_respects_utf8_boundaries() {
         let chunks = split_text("你好世界", 7);
         assert_eq!(chunks, vec!["你好", "世界"]);
+    }
+
+    #[test]
+    fn split_text_preserves_every_byte_at_newline_boundaries() {
+        let text = "first paragraph\nsecond paragraph\nthird paragraph";
+        let chunks = split_text(text, 18);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 18));
+        assert_eq!(chunks.concat(), text);
     }
 }
