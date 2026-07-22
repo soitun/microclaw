@@ -972,7 +972,15 @@ curl -sS http://127.0.0.1:10961/hooks/wake \
 
 ## Release
 
-Publish both installer mode (GitHub Release asset used by `install.sh`) and Homebrew mode with one command:
+From Windows, trigger the native Windows, macOS, and Linux GitHub Actions builders for the version declared in `Cargo.toml`:
+
+```powershell
+.\scripts\trigger_release.ps1 -Wait
+```
+
+The script requires `git`, an authenticated GitHub CLI (`gh`), a clean worktree, a commit on `origin/main`, and successful CI. It creates the matching `v<version>` tag through the audited tag workflow, then builds and uploads release archives, checksums, and container images. Omit `-Wait` to return after triggering the asset workflow.
+
+On Unix, publish both installer mode (GitHub Release asset used by `install.sh`) and Homebrew mode with one command:
 
 ```sh
 ./deploy.sh

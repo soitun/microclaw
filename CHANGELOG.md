@@ -8,6 +8,8 @@ The format is loosely based on Keep a Changelog. Dates use UTC.
 
 ### Added
 
+- Added `scripts/trigger_release.ps1` so Windows operators can validate and trigger the audited
+  tag plus native Windows, macOS, Linux, checksum, and container release workflows with one command.
 - **Durable chunk-level outbound delivery.** User-visible channel messages are now persisted before
   the first network call and tracked as independently retryable chunks. Interrupted sends resume
   from the unfinished chunk after restart, the full logical reply is stored exactly once, and
