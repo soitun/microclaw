@@ -110,7 +110,7 @@ try {
     Invoke-Checked @("gh", "auth", "status")
     Wait-ForCi -Commit $resolvedSha
 
-    & gh api "repos/$Repository/git/ref/tags/$tag" *> $null
+    & git show-ref --verify --quiet "refs/tags/$tag"
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Tag already exists: $tag"
     } else {
