@@ -26,9 +26,18 @@ function Get-LatestWorkflowRun {
     )
 
     $args = @("run", "list", "--repo", $Repository, "--workflow", $Workflow, "--limit", "20", "--json", "databaseId,headSha,status,conclusion,createdAt,url")
-    $runs = & gh @args | ConvertFrom-Json
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to list workflow runs for $Workflow"
+    $runs = $null
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        $json = & gh @args 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $runs = $json | ConvertFrom-Json
+            break
+        }
+        Write-Warning "Unable to list $Workflow runs (attempt $attempt/5); retrying in 3 seconds"
+        Start-Sleep -Seconds 3
+    }
+    if ($null -eq $runs) {
+        throw "Unable to list workflow runs for $Workflow after retries"
     }
     if ($Commit) {
         return $runs | Where-Object { $_.headSha -eq $Commit } | Select-Object -First 1
@@ -117,7 +126,7 @@ try {
         Write-Host "Creating $tag at $resolvedSha ..."
         Invoke-Checked @("gh", "workflow", "run", "tag-release.yml", "--repo", $Repository, "-f", "tag=$tag", "-f", "sha=$resolvedSha")
         Start-Sleep -Seconds 3
-        $tagRun = Get-LatestWorkflowRun -Workflow "tag-release.yml"
+        $tagRun = Get-LatestWorkflowRun -Workflow "tag-release.yml" -Commit $resolvedSha
         if ($null -eq $tagRun) {
             throw "Tag workflow was dispatched but its run could not be found"
         }
@@ -127,7 +136,7 @@ try {
     Write-Host "Triggering multi-platform assets for $tag ..."
     Invoke-Checked @("gh", "workflow", "run", "release-assets.yml", "--repo", $Repository, "-f", "tag=$tag")
     Start-Sleep -Seconds 3
-    $releaseRun = Get-LatestWorkflowRun -Workflow "release-assets.yml"
+    $releaseRun = Get-LatestWorkflowRun -Workflow "release-assets.yml" -Commit $resolvedSha
     if ($null -eq $releaseRun) {
         throw "Release workflow was dispatched but its run could not be found"
     }
